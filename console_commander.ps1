@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Continue'
 $script:ApplicationName = 'console_commander'
 $script:AppMetadata = @{
     Name = 'console_commander'
-    Version = '0.7.0'
+    Version = '0.8.0'
     OwnerName = 'Zolnai Zsolt'
     OwnerEmail = 'zzsolt@gmail.com'
     Repository = 'https://github.com/zzsolt/console_commander'
@@ -56,6 +56,7 @@ $script:RenderState = @{
     LastHeight = 0
     LineCache = @{}
     TopMenuZones = @()
+    FunctionKeyZones = @()
     LeftPanelZone = $null
     RightPanelZone = $null
     DialogButtonZones = @()
@@ -867,6 +868,7 @@ function Set-PanelLocalPath {
     param(
         [hashtable]$Panel,
         [string]$Path,
+        [string]$SelectPath = '',
         [bool]$AddHistory = $true
     )
 
@@ -886,7 +888,49 @@ function Set-PanelLocalPath {
         Add-PanelHistory -Panel $Panel -Path $normalized
     }
     Refresh-Panel -Panel $Panel
+    if (-not [string]::IsNullOrWhiteSpace($SelectPath)) {
+        Select-PanelItemByPath -Panel $Panel -Path $SelectPath
+    }
     return $true
+}
+
+function Select-PanelItemByPath {
+    param(
+        [hashtable]$Panel,
+        [string]$Path
+    )
+
+    if ($null -eq $Panel -or [string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    $normalized = Get-NormalizedPath -Path $Path
+    for ($i = 0; $i -lt $Panel.Items.Count; $i++) {
+        $item = $Panel.Items[$i]
+        if ($item.IsParent) {
+            continue
+        }
+        if ([string]::Equals((Get-NormalizedPath -Path ([string]$item.FullName)), $normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Set-SelectionAbsolute -Panel $Panel -Index $i -VisibleRows $script:State.VisibleRows
+            return $true
+        }
+    }
+
+    $leaf = Split-Path -Path $normalized -Leaf
+    if ([string]::IsNullOrWhiteSpace($leaf)) {
+        $leaf = $normalized
+    }
+    for ($i = 0; $i -lt $Panel.Items.Count; $i++) {
+        $item = $Panel.Items[$i]
+        if ($item.IsParent) {
+            continue
+        }
+        if ([string]::Equals([string]$item.Name, $leaf, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Set-SelectionAbsolute -Panel $Panel -Index $i -VisibleRows $script:State.VisibleRows
+            return $true
+        }
+    }
+    return $false
 }
 
 # English: Navigate stored panel history without adding another history entry.
@@ -1891,13 +1935,120 @@ function Add-CommandLineToLines {
     }
     $line = $Lines[$Layout.CommandLineRow]
     $label = 'Cmd: '
-    $maxPrompt = [Math]::Max(8, $Layout.Width - $script:State.CommandLine.Length - $label.Length - 1)
+    Normalize-CommandCursor
+    $maxPrompt = [Math]::Max(8, $Layout.Width - $label.Length - 2)
     if ($maxPrompt -gt 42) { $maxPrompt = 42 }
     $prompt = (Get-ShortPromptPath -Path (Get-ActivePanel).Path -MaxLength $maxPrompt) + '>'
-    $text = $label + $prompt + $script:State.CommandLine
+    $commandWidth = [Math]::Max(1, $Layout.Width - $label.Length - $prompt.Length)
+    $cursor = [int]$script:State.CommandCursor
+    $offset = 0
+    if ($cursor -ge $commandWidth) {
+        $offset = $cursor - $commandWidth + 1
+    }
+    if ($offset -gt $script:State.CommandLine.Length) {
+        $offset = $script:State.CommandLine.Length
+    }
+    $visibleCommand = ''
+    if ($offset -lt $script:State.CommandLine.Length) {
+        $visibleCommand = $script:State.CommandLine.Substring($offset)
+    }
+    if ($visibleCommand.Length -gt $commandWidth) {
+        $visibleCommand = $visibleCommand.Substring(0, $commandWidth)
+    }
+    $text = $label + $prompt + $visibleCommand
     Add-RenderSegment -Line $line -Left 0 -Text $text -Width $Layout.Width -Foreground $fg -Background $bg
-    $script:RenderState.CommandCursorLeft = [Math]::Min($Layout.Width - 1, $label.Length + $prompt.Length + $script:State.CommandLine.Length)
+    $script:RenderState.CommandCursorLeft = [Math]::Min($Layout.Width - 1, $label.Length + $prompt.Length + ($cursor - $offset))
     $script:RenderState.CommandCursorTop = $Layout.CommandLineRow
+}
+
+function Normalize-CommandCursor {
+    if ($null -eq $script:State) {
+        return
+    }
+    if ($null -eq $script:State.CommandLine) {
+        $script:State.CommandLine = ''
+    }
+    if ($null -eq $script:State.CommandCursor) {
+        $script:State.CommandCursor = $script:State.CommandLine.Length
+    }
+    if ($script:State.CommandCursor -lt 0) {
+        $script:State.CommandCursor = 0
+    }
+    if ($script:State.CommandCursor -gt $script:State.CommandLine.Length) {
+        $script:State.CommandCursor = $script:State.CommandLine.Length
+    }
+}
+
+function Insert-CommandLineText {
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return
+    }
+    Normalize-CommandCursor
+    $cleanText = $Text.Replace("`r", '').Replace("`n", ' ')
+    $script:State.CommandLine = $script:State.CommandLine.Insert([int]$script:State.CommandCursor, $cleanText)
+    $script:State.CommandCursor += $cleanText.Length
+}
+
+function Remove-CommandLineCharacterBeforeCursor {
+    Normalize-CommandCursor
+    if ($script:State.CommandCursor -le 0) {
+        return
+    }
+    $script:State.CommandLine = $script:State.CommandLine.Remove($script:State.CommandCursor - 1, 1)
+    $script:State.CommandCursor--
+}
+
+function Remove-CommandLineCharacterAtCursor {
+    Normalize-CommandCursor
+    if ($script:State.CommandCursor -ge $script:State.CommandLine.Length) {
+        return
+    }
+    $script:State.CommandLine = $script:State.CommandLine.Remove($script:State.CommandCursor, 1)
+}
+
+function Move-CommandCursorLeft {
+    Normalize-CommandCursor
+    if ($script:State.CommandCursor -gt 0) {
+        $script:State.CommandCursor--
+    }
+}
+
+function Move-CommandCursorRight {
+    Normalize-CommandCursor
+    if ($script:State.CommandCursor -lt $script:State.CommandLine.Length) {
+        $script:State.CommandCursor++
+    }
+}
+
+function Move-CommandCursorHome {
+    $script:State.CommandCursor = 0
+}
+
+function Move-CommandCursorEnd {
+    Normalize-CommandCursor
+    $script:State.CommandCursor = $script:State.CommandLine.Length
+}
+
+function Clear-CommandLine {
+    $script:State.CommandLine = ''
+    $script:State.CommandCursor = 0
+}
+
+function Paste-CommandLineText {
+    $clipText = ''
+    try {
+        if ($null -ne (Get-Command -Name Get-Clipboard -ErrorAction SilentlyContinue)) {
+            $clipText = [string](Get-Clipboard -Raw -ErrorAction Stop)
+        }
+    }
+    catch {
+        $clipText = ''
+    }
+    Insert-CommandLineText -Text $clipText
 }
 
 function Add-FunctionKeyBarToLines {
@@ -1909,13 +2060,29 @@ function Add-FunctionKeyBarToLines {
     $colors = Get-ThemeColors
     $line = $Lines[$Layout.FunctionKeyRow]
     $items = @(
-        @('F1', 'Help'), @('F2', 'User'), @('F3', 'View'), @('F4', 'Edit'), @('F5', 'Copy'),
-        @('F6', 'Move'), @('F7', 'Mkdir'), @('F8', 'Delete'), @('F9', 'Menu'), @('F10', 'Quit')
+        @('F1', 'Help', [System.ConsoleKey]::F1), @('F2', 'User', [System.ConsoleKey]::F2), @('F3', 'View', [System.ConsoleKey]::F3), @('F4', 'Edit', [System.ConsoleKey]::F4), @('F5', 'Copy', [System.ConsoleKey]::F5),
+        @('F6', 'Move', [System.ConsoleKey]::F6), @('F7', 'Mkdir', [System.ConsoleKey]::F7), @('F8', 'Delete', [System.ConsoleKey]::F8), @('F9', 'Menu', [System.ConsoleKey]::F9), @('F10', 'Quit', [System.ConsoleKey]::F10)
     )
+    $script:RenderState.FunctionKeyZones = @()
     if (-not [bool]$script:Config.UseColor) {
         $parts = @()
+        $x = 0
         foreach ($item in $items) {
-            $parts += ('{0}:{1}' -f $item[0], $item[1])
+            $key = [string]$item[0]
+            $label = [string]$item[1]
+            $part = ('{0}:{1}' -f $key, $label)
+            if (($x + $part.Length) -le $Layout.Width) {
+                $script:RenderState.FunctionKeyZones += [pscustomobject]@{
+                    Key = $key
+                    Label = $label
+                    ConsoleKey = $item[2]
+                    Left = $x
+                    Right = $x + $part.Length - 1
+                    Top = $Layout.FunctionKeyRow
+                }
+            }
+            $parts += $part
+            $x += $part.Length + 3
         }
         $keys = [string]::Join(' | ', [string[]]$parts)
         Add-RenderSegment -Line $line -Left 0 -Text $keys -Width $Layout.Width -Foreground ([ConsoleColor]::Gray) -Background ([ConsoleColor]::Black)
@@ -1927,11 +2094,22 @@ function Add-FunctionKeyBarToLines {
     foreach ($item in $items) {
         $key = [string]$item[0]
         $label = [string]$item[1]
+        $consoleKey = $item[2]
         $tokenText = (' {0} ' -f $key)
         $labelText = (' {0} ' -f $label)
         $segmentWidth = $tokenText.Length + $labelText.Length + 1
         if (($x + $segmentWidth) -gt $Layout.Width) {
             break
+        }
+        $segmentLeft = $x
+        $segmentRight = $x + $segmentWidth - 1
+        $script:RenderState.FunctionKeyZones += [pscustomobject]@{
+            Key = $key
+            Label = $label
+            ConsoleKey = $consoleKey
+            Left = $segmentLeft
+            Right = $segmentRight
+            Top = $Layout.FunctionKeyRow
         }
         Add-RenderSegment -Line $line -Left $x -Text $tokenText -Width $tokenText.Length -Foreground $colors.KeyLabelForeground -Background $colors.KeyLabelBackground
         $x += $tokenText.Length
@@ -1955,6 +2133,7 @@ function Build-AppScreenLines {
 
     $layout = Get-ConsoleCommanderLayout -Width $Width -Height $Height
     $script:RenderState.LastLayout = $layout
+    $script:RenderState.FunctionKeyZones = @()
 
     if ($layout.TooSmall) {
         Add-RenderSegment -Line $lines[0] -Left 0 -Text ' console_commander ' -Width $Width -Foreground ([ConsoleColor]::White) -Background ([ConsoleColor]::DarkBlue)
@@ -2884,6 +3063,10 @@ function Try-ConvertVtKeySequence {
         'D' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::LeftArrow) -Modifiers $modifiers) }
         'H' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::Home) -Modifiers $modifiers) }
         'F' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::End) -Modifiers $modifiers) }
+        'P' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::F1) -Modifiers $modifiers) }
+        'Q' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::F2) -Modifiers $modifiers) }
+        'R' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::F3) -Modifiers $modifiers) }
+        'S' { return (New-VtConsoleKeyInfo -Key ([System.ConsoleKey]::F4) -Modifiers $modifiers) }
         '~' {
             if ($parts.Count -eq 0) {
                 return $null
@@ -3710,11 +3893,170 @@ function Show-ProgressDialog {
         [string]$Operation,
         [string]$CurrentItem,
         [int]$Index,
-        [int]$Total
+        [int]$Total,
+        [object]$Progress = $null
     )
 
     Render-App
-    Draw-DialogBox -Title 'Progress' -MessageLines @($Operation, ('{0}/{1}' -f $Index, $Total), $CurrentItem, 'Press Esc between items to cancel when prompted.') -Buttons @() -SelectedButton 0
+    if ($null -eq $Progress) {
+        Draw-DialogBox -Title 'Progress' -MessageLines @($Operation, ('Item {0} / {1}' -f $Index, $Total), $CurrentItem, 'Press Esc between items to cancel when prompted.') -Buttons @() -SelectedButton 0
+        return
+    }
+    Show-CopyProgressDialog -Progress $Progress
+}
+
+function Format-Speed {
+    param(
+        [double]$BytesPerSecond
+    )
+
+    if ($BytesPerSecond -le 0) {
+        return 'unknown'
+    }
+    return ('{0}/s' -f (Format-ByteSize -Bytes ([long]$BytesPerSecond)))
+}
+
+function Format-TimeSpanCompact {
+    param(
+        [object]$Seconds
+    )
+
+    if ($null -eq $Seconds -or $Seconds -lt 0) {
+        return 'unknown'
+    }
+    $span = [TimeSpan]::FromSeconds([Math]::Max(0, [double]$Seconds))
+    if ($span.TotalHours -ge 1) {
+        return ('{0:00}:{1:00}:{2:00}' -f [int][Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds)
+    }
+    return ('00:{0:00}:{1:00}' -f $span.Minutes, $span.Seconds)
+}
+
+function New-ProgressBarText {
+    param(
+        [int]$Width,
+        [double]$Percent
+    )
+
+    if ($Width -lt 10) {
+        $Width = 10
+    }
+    if ($Percent -lt 0) { $Percent = 0 }
+    if ($Percent -gt 100) { $Percent = 100 }
+    $innerWidth = [Math]::Max(1, $Width - 2)
+    $filled = [int][Math]::Round(($Percent / 100.0) * $innerWidth)
+    if ($filled -gt $innerWidth) { $filled = $innerWidth }
+    return ('[{0}{1}] {2,3:N0}%' -f ('#' * $filled), ('-' * ($innerWidth - $filled)), $Percent)
+}
+
+function New-OperationProgress {
+    param(
+        [string]$Operation,
+        [int]$TotalItems,
+        [long]$TotalBytes
+    )
+
+    return [pscustomobject]@{
+        Operation = $Operation
+        TotalItems = [Math]::Max(1, $TotalItems)
+        CurrentItemIndex = 0
+        CurrentItem = ''
+        CurrentFileBytes = 0L
+        CurrentFileTotal = 0L
+        TotalBytes = [long]$TotalBytes
+        BytesCopied = 0L
+        SkippedCount = 0
+        ErrorCount = 0
+        StartTime = [datetime]::Now
+        LastRenderTime = [datetime]::MinValue
+    }
+}
+
+function Start-ProgressItem {
+    param(
+        [object]$Progress,
+        [string]$CurrentItem,
+        [long]$CurrentFileTotal = 0
+    )
+
+    if ($null -eq $Progress) {
+        return
+    }
+    $Progress.CurrentItemIndex++
+    $Progress.CurrentItem = $CurrentItem
+    $Progress.CurrentFileBytes = 0L
+    $Progress.CurrentFileTotal = [long]$CurrentFileTotal
+    Update-OperationProgress -Progress $Progress -Force
+}
+
+function Update-OperationProgress {
+    param(
+        [object]$Progress,
+        [long]$BytesDelta = 0,
+        [switch]$Force
+    )
+
+    if ($null -eq $Progress) {
+        return
+    }
+    if ($BytesDelta -gt 0) {
+        $Progress.CurrentFileBytes += [long]$BytesDelta
+        $Progress.BytesCopied += [long]$BytesDelta
+    }
+    if ($script:NonInteractiveMode) {
+        return
+    }
+    $now = [datetime]::Now
+    if (-not $Force.IsPresent -and (($now - $Progress.LastRenderTime).TotalMilliseconds -lt 150)) {
+        return
+    }
+    $Progress.LastRenderTime = $now
+    Show-CopyProgressDialog -Progress $Progress
+}
+
+function Show-CopyProgressDialog {
+    param(
+        [object]$Progress
+    )
+
+    if ($null -eq $Progress) {
+        return
+    }
+    $elapsed = ([datetime]::Now - [datetime]$Progress.StartTime).TotalSeconds
+    $speed = 0.0
+    if ($elapsed -gt 0) {
+        $speed = ([double]$Progress.BytesCopied / $elapsed)
+    }
+    $percent = 0.0
+    $etaText = 'unknown'
+    if ([long]$Progress.TotalBytes -gt 0) {
+        $percent = ([double]$Progress.BytesCopied / [double]$Progress.TotalBytes) * 100.0
+        if ($speed -gt 0.1) {
+            $remaining = [Math]::Max(0, [double]$Progress.TotalBytes - [double]$Progress.BytesCopied)
+            $etaText = Format-TimeSpanCompact -Seconds ($remaining / $speed)
+        }
+    }
+    $currentBytesText = 'Current: unknown'
+    if ([long]$Progress.CurrentFileTotal -gt 0) {
+        $currentBytesText = ('Current: {0} / {1}' -f (Format-ByteSize -Bytes $Progress.CurrentFileBytes), (Format-ByteSize -Bytes $Progress.CurrentFileTotal))
+    }
+    $totalBytesText = 'Total size: unknown'
+    if ([long]$Progress.TotalBytes -gt 0) {
+        $totalBytesText = ('Total: {0} / {1}' -f (Format-ByteSize -Bytes $Progress.BytesCopied), (Format-ByteSize -Bytes $Progress.TotalBytes))
+    }
+    $bar = New-ProgressBarText -Width 30 -Percent $percent
+    $lines = @(
+        [string]$Progress.Operation,
+        ('Item {0} / {1}' -f $Progress.CurrentItemIndex, $Progress.TotalItems),
+        (Truncate-Text -Text ([string]$Progress.CurrentItem) -Width 62),
+        $currentBytesText,
+        $totalBytesText,
+        $bar,
+        ('Speed: {0}' -f (Format-Speed -BytesPerSecond $speed)),
+        ('ETA: {0}' -f $etaText),
+        ('Skipped: {0}   Errors: {1}' -f $Progress.SkippedCount, $Progress.ErrorCount),
+        'Press Esc to cancel during file copy.'
+    )
+    Draw-DialogBox -Title 'Progress' -MessageLines $lines -Buttons @() -SelectedButton 0
 }
 
 function Test-CancelKeyPending {
@@ -3738,6 +4080,215 @@ function Show-MenuList {
     )
 
     return (Show-ChoiceDialog -Title $Title -Items $Items)
+}
+
+function Format-ByteSize {
+    param(
+        [object]$Bytes
+    )
+
+    if ($null -eq $Bytes) {
+        return 'unknown'
+    }
+    $value = [double]$Bytes
+    if ($value -lt 1024) { return ('{0:N0} B' -f $value) }
+    if ($value -lt 1048576) { return ('{0:N1} KB' -f ($value / 1024)) }
+    if ($value -lt 1073741824) { return ('{0:N1} MB' -f ($value / 1048576)) }
+    return ('{0:N1} GB' -f ($value / 1073741824))
+}
+
+function Format-DriveTypeText {
+    param(
+        [System.IO.DriveType]$DriveType
+    )
+
+    switch ($DriveType) {
+        ([System.IO.DriveType]::Fixed) { return 'Fixed' }
+        ([System.IO.DriveType]::Removable) { return 'Removable' }
+        ([System.IO.DriveType]::Network) { return 'Network' }
+        ([System.IO.DriveType]::CDRom) { return 'CD-ROM' }
+        ([System.IO.DriveType]::Ram) { return 'RAM' }
+        default { return 'Unknown' }
+    }
+}
+
+function Format-DriveSizeInfo {
+    param(
+        [object]$DriveItem
+    )
+
+    if ($null -eq $DriveItem -or -not [bool]$DriveItem.IsReady) {
+        return 'unavailable'
+    }
+    return ('{0} free / {1}' -f (Format-ByteSize -Bytes $DriveItem.FreeBytes), (Format-ByteSize -Bytes $DriveItem.TotalBytes))
+}
+
+function Get-AvailableDriveItems {
+    $items = @()
+    try {
+        $drives = @([System.IO.DriveInfo]::GetDrives() | Sort-Object -Property Name)
+        foreach ($drive in $drives) {
+            $isReady = $false
+            $label = ''
+            $freeBytes = $null
+            $totalBytes = $null
+            try { $isReady = [bool]$drive.IsReady } catch { $isReady = $false }
+            if ($isReady) {
+                try { $label = [string]$drive.VolumeLabel } catch { $label = '' }
+                try { $freeBytes = [long]$drive.AvailableFreeSpace } catch { $freeBytes = $null }
+                try { $totalBytes = [long]$drive.TotalSize } catch { $totalBytes = $null }
+            }
+            elseif ([string]::IsNullOrWhiteSpace($label)) {
+                $label = 'No media'
+            }
+            $items += [pscustomobject]@{
+                Root = [string]$drive.Name
+                Type = (Format-DriveTypeText -DriveType $drive.DriveType)
+                IsReady = $isReady
+                Label = $label
+                FreeBytes = $freeBytes
+                TotalBytes = $totalBytes
+            }
+        }
+    }
+    catch {
+        Write-AppLog -Level 'ERROR' -Message ('DriveInfo enumeration failed: {0}' -f $_.Exception.Message)
+    }
+    return @($items)
+}
+
+function Format-DriveChooserLine {
+    param(
+        [object]$DriveItem,
+        [int]$Width
+    )
+
+    $label = [string]$DriveItem.Label
+    if ([string]::IsNullOrWhiteSpace($label)) {
+        $label = '-'
+    }
+    $text = ('{0,-5} {1,-9} {2,-14} {3}' -f $DriveItem.Root, $DriveItem.Type, $label, (Format-DriveSizeInfo -DriveItem $DriveItem))
+    return (Truncate-Text -Text $text -Width $Width)
+}
+
+function Show-DriveChooserDialog {
+    param(
+        [string]$PanelName
+    )
+
+    $drives = @(Get-AvailableDriveItems)
+    if ($drives.Count -eq 0) {
+        Show-Message -Message 'No drives found.'
+        return $null
+    }
+
+    $selected = 0
+    $firstVisible = 0
+    while ($true) {
+        Render-App
+        $size = Get-ConsoleSizeSafe
+        $screenWidth = $size.Width
+        $screenHeight = $size.Height
+        $width = [Math]::Min($screenWidth - 4, 78)
+        if ($width -lt 42) { $width = [Math]::Max(30, $screenWidth) }
+        $height = [Math]::Min($screenHeight - 4, $drives.Count + 5)
+        if ($height -lt 8) { $height = 8 }
+        $visibleItems = [Math]::Max(1, $height - 4)
+        if ($selected -lt $firstVisible) { $firstVisible = $selected }
+        if ($selected -ge ($firstVisible + $visibleItems)) { $firstVisible = $selected - $visibleItems + 1 }
+        $left = [Math]::Max(0, [int](($screenWidth - $width) / 2))
+        $top = [Math]::Max(0, [int](($screenHeight - $height) / 2))
+        $border = Get-BorderCharacters
+        $title = (' Drive list: {0} panel ' -f $PanelName)
+        Write-At -Left $left -Top $top -Text ($border.TopLeft + ($border.Horizontal * ($width - 2)) + $border.TopRight) -Width $width -Foreground ([ConsoleColor]::White) -Background ([ConsoleColor]::DarkBlue)
+        Write-At -Left ($left + 1) -Top $top -Text (Truncate-Text -Text $title -Width ($width - 2)) -Width ($width - 2) -Foreground ([ConsoleColor]::White) -Background ([ConsoleColor]::DarkBlue)
+        for ($i = 0; $i -lt $visibleItems; $i++) {
+            $itemIndex = $firstVisible + $i
+            $lineText = ''
+            if ($itemIndex -lt $drives.Count) {
+                $lineText = Format-DriveChooserLine -DriveItem $drives[$itemIndex] -Width ($width - 2)
+            }
+            $fg = [ConsoleColor]::Gray
+            $bg = [ConsoleColor]::Black
+            if ($itemIndex -eq $selected) {
+                $fg = [ConsoleColor]::Black
+                $bg = [ConsoleColor]::Cyan
+            }
+            Write-At -Left $left -Top ($top + 1 + $i) -Text ($border.Vertical + (Truncate-Text -Text $lineText -Width ($width - 2)) + $border.Vertical) -Width $width -Foreground $fg -Background $bg
+        }
+        $hint = ' Enter: select   Esc: cancel '
+        Write-At -Left $left -Top ($top + $height - 2) -Text ($border.Vertical + (Truncate-Text -Text $hint -Width ($width - 2)) + $border.Vertical) -Width $width -Foreground ([ConsoleColor]::Gray) -Background ([ConsoleColor]::Black)
+        Write-At -Left $left -Top ($top + $height - 1) -Text ($border.BottomLeft + ($border.Horizontal * ($width - 2)) + $border.BottomRight) -Width $width -Foreground ([ConsoleColor]::White) -Background ([ConsoleColor]::DarkBlue)
+
+        $event = Read-InputEvent
+        if ($event.Type -eq 'Mouse' -and $event.ButtonDown) {
+            $itemIndex = $firstVisible + ($event.Y - ($top + 1))
+            if ($event.X -lt $left -or $event.X -ge ($left + $width) -or $itemIndex -lt 0 -or $itemIndex -ge $drives.Count) {
+                Request-FullRedraw
+                return $null
+            }
+            $selected = $itemIndex
+            if ([bool]$event.DoubleClick) {
+                Request-FullRedraw
+                return $drives[$selected]
+            }
+            continue
+        }
+        if ($event.Type -ne 'Key') {
+            continue
+        }
+        switch ($event.KeyInfo.Key) {
+            ([ConsoleKey]::UpArrow) { if ($selected -gt 0) { $selected-- } }
+            ([ConsoleKey]::DownArrow) { if ($selected -lt ($drives.Count - 1)) { $selected++ } }
+            ([ConsoleKey]::PageUp) { $selected = [Math]::Max(0, $selected - $visibleItems) }
+            ([ConsoleKey]::PageDown) { $selected = [Math]::Min($drives.Count - 1, $selected + $visibleItems) }
+            ([ConsoleKey]::Home) { $selected = 0 }
+            ([ConsoleKey]::End) { $selected = $drives.Count - 1 }
+            ([ConsoleKey]::Enter) { Request-FullRedraw; return $drives[$selected] }
+            ([ConsoleKey]::Escape) { Request-FullRedraw; return $null }
+        }
+    }
+}
+
+function Select-DriveForPanel {
+    param(
+        [hashtable]$Panel
+    )
+
+    if ($null -eq $Panel) {
+        return $false
+    }
+    $drive = Show-DriveChooserDialog -PanelName ([string]$Panel.Name)
+    if ($null -eq $drive) {
+        return $false
+    }
+    return (Set-PanelDriveSelection -Panel $Panel -DriveItem $drive -ShowErrors)
+}
+
+function Set-PanelDriveSelection {
+    param(
+        [hashtable]$Panel,
+        [object]$DriveItem,
+        [switch]$ShowErrors
+    )
+
+    if ($null -eq $Panel -or $null -eq $DriveItem) {
+        return $false
+    }
+    if (-not [bool]$DriveItem.IsReady) {
+        if ($ShowErrors.IsPresent) {
+            Show-Message -Message ('Path not available: {0}' -f $DriveItem.Root)
+        }
+        return $false
+    }
+    if (-not (Set-PanelLocalPath -Panel $Panel -Path ([string]$DriveItem.Root))) {
+        if ($ShowErrors.IsPresent) {
+            Show-Message -Message ('Path not available: {0}' -f $DriveItem.Root)
+        }
+        return $false
+    }
+    $script:State.ActivePanel = [string]$Panel.Name
+    return $true
 }
 
 function Get-SelectedOrMarkedItems {
@@ -3993,11 +4544,13 @@ function Copy-FileSafe {
         [string]$Destination,
         [ref]$OverwritePolicy,
         [bool]$AssumeYes = $false,
-        [switch]$SimulateFailureAfterBackup
+        [switch]$SimulateFailureAfterBackup,
+        [object]$Progress = $null
     )
 
     $temporaryPath = $null
     $backupPath = $null
+    $wasCanceled = $false
     try {
         $decision = Get-OverwriteDecision -Destination $Destination -OverwritePolicy $OverwritePolicy -AssumeYes $AssumeYes
         if ($decision -eq 'Cancel') {
@@ -4012,7 +4565,30 @@ function Copy-FileSafe {
 
         $sourceInfo = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
         $temporaryPath = New-SiblingTemporaryPath -Path $Destination -Purpose 'copy_incoming'
-        Copy-Item -LiteralPath $Source -Destination $temporaryPath -Force -ErrorAction Stop
+        Start-ProgressItem -Progress $Progress -CurrentItem $Source -CurrentFileTotal ([long]$sourceInfo.Length)
+        $inputStream = $null
+        $outputStream = $null
+        try {
+            $inputStream = New-Object System.IO.FileStream($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            $outputStream = New-Object System.IO.FileStream($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $buffer = New-Object byte[] 1048576
+            while ($true) {
+                $read = $inputStream.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) {
+                    break
+                }
+                $outputStream.Write($buffer, 0, $read)
+                Update-OperationProgress -Progress $Progress -BytesDelta ([long]$read)
+                if ($null -ne $Progress -and (Test-CancelKeyPending)) {
+                    $wasCanceled = $true
+                    throw 'Copy canceled.'
+                }
+            }
+        }
+        finally {
+            if ($null -ne $outputStream) { $outputStream.Dispose() }
+            if ($null -ne $inputStream) { $inputStream.Dispose() }
+        }
         $tempInfo = Get-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
         if ([long]$tempInfo.Length -ne [long]$sourceInfo.Length) {
             throw 'Temporary copy validation failed.'
@@ -4037,10 +4613,16 @@ function Copy-FileSafe {
         if ($null -ne $backupPath -and (Test-Path -LiteralPath $backupPath)) {
             Remove-Item -LiteralPath $backupPath -Force -ErrorAction Stop
         }
+        Update-OperationProgress -Progress $Progress -Force
         return 'Copied'
     }
     catch {
-        Write-AppLog -Level 'ERROR' -Message ('Copy file failed {0} -> {1}: {2}' -f $Source, $Destination, $_.Exception.Message)
+        if ($wasCanceled) {
+            Write-AppLog -Level 'WARN' -Message ('Copy canceled {0} -> {1}' -f $Source, $Destination)
+        }
+        else {
+            Write-AppLog -Level 'ERROR' -Message ('Copy file failed {0} -> {1}: {2}' -f $Source, $Destination, $_.Exception.Message)
+        }
         if ($null -ne $backupPath -and (Test-Path -LiteralPath $backupPath)) {
             [void](Restore-MoveBackup -BackupPath $backupPath -Destination $Destination -Reason $_.Exception.Message)
         }
@@ -4052,6 +4634,9 @@ function Copy-FileSafe {
                 Write-AppLog -Level 'WARN' -Message ('Temporary copy file cleanup failed {0}: {1}' -f $temporaryPath, $_.Exception.Message)
             }
         }
+        if ($wasCanceled) {
+            return 'Cancel'
+        }
         return 'Error'
     }
 }
@@ -4061,13 +4646,16 @@ function Copy-DirectorySafe {
         [string]$Source,
         [string]$Destination,
         [ref]$OverwritePolicy,
-        [bool]$AssumeYes = $false
+        [bool]$AssumeYes = $false,
+        [object]$Progress = $null
     )
 
     $temporaryPath = $null
     $backupPath = $null
+    $wasCanceled = $false
     try {
         $sourceInfo = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+        Start-ProgressItem -Progress $Progress -CurrentItem $Source -CurrentFileTotal 0
         if (($sourceInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             Write-AppLog -Level 'WARN' -Message ('Reparse directory skipped during copy: {0}' -f $Source)
             return 'Skipped'
@@ -4088,12 +4676,16 @@ function Copy-DirectorySafe {
             foreach ($childForTemp in $childrenForTemp) {
                 $tempTarget = Join-Path -Path $temporaryPath -ChildPath $childForTemp.Name
                 if (($childForTemp.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
-                    $tempResult = Copy-DirectorySafe -Source $childForTemp.FullName -Destination $tempTarget -OverwritePolicy $OverwritePolicy -AssumeYes $true
+                    $tempResult = Copy-DirectorySafe -Source $childForTemp.FullName -Destination $tempTarget -OverwritePolicy $OverwritePolicy -AssumeYes $true -Progress $Progress
                 }
                 else {
-                    $tempResult = Copy-FileSafe -Source $childForTemp.FullName -Destination $tempTarget -OverwritePolicy $OverwritePolicy -AssumeYes $true
+                    $tempResult = Copy-FileSafe -Source $childForTemp.FullName -Destination $tempTarget -OverwritePolicy $OverwritePolicy -AssumeYes $true -Progress $Progress
                 }
-                if ($tempResult -eq 'Cancel' -or $tempResult -eq 'Error') {
+                if ($tempResult -eq 'Cancel') {
+                    $wasCanceled = $true
+                    throw ('Temporary directory copy canceled for {0}' -f $childForTemp.FullName)
+                }
+                if ($tempResult -eq 'Error') {
                     throw ('Temporary directory copy failed for {0}' -f $childForTemp.FullName)
                 }
             }
@@ -4122,12 +4714,13 @@ function Copy-DirectorySafe {
         foreach ($child in $children) {
             $target = Join-Path -Path $Destination -ChildPath $child.Name
             if (($child.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
-                $result = Copy-DirectorySafe -Source $child.FullName -Destination $target -OverwritePolicy $OverwritePolicy -AssumeYes $AssumeYes
+                $result = Copy-DirectorySafe -Source $child.FullName -Destination $target -OverwritePolicy $OverwritePolicy -AssumeYes $AssumeYes -Progress $Progress
             }
             else {
-                $result = Copy-FileSafe -Source $child.FullName -Destination $target -OverwritePolicy $OverwritePolicy -AssumeYes $AssumeYes
+                $result = Copy-FileSafe -Source $child.FullName -Destination $target -OverwritePolicy $OverwritePolicy -AssumeYes $AssumeYes -Progress $Progress
             }
             if ($result -eq 'Cancel') {
+                $wasCanceled = $true
                 return 'Cancel'
             }
         }
@@ -4138,7 +4731,12 @@ function Copy-DirectorySafe {
         return 'Copied'
     }
     catch {
-        Write-AppLog -Level 'ERROR' -Message ('Copy directory failed {0} -> {1}: {2}' -f $Source, $Destination, $_.Exception.Message)
+        if ($wasCanceled) {
+            Write-AppLog -Level 'WARN' -Message ('Copy directory canceled {0} -> {1}' -f $Source, $Destination)
+        }
+        else {
+            Write-AppLog -Level 'ERROR' -Message ('Copy directory failed {0} -> {1}: {2}' -f $Source, $Destination, $_.Exception.Message)
+        }
         if ($null -ne $backupPath -and (Test-Path -LiteralPath $backupPath)) {
             [void](Restore-MoveBackup -BackupPath $backupPath -Destination $Destination -Reason $_.Exception.Message)
         }
@@ -4149,6 +4747,9 @@ function Copy-DirectorySafe {
             catch {
                 Write-AppLog -Level 'WARN' -Message ('Temporary copy directory cleanup failed {0}: {1}' -f $temporaryPath, $_.Exception.Message)
             }
+        }
+        if ($wasCanceled) {
+            return 'Cancel'
         }
         return 'Error'
     }
@@ -4176,10 +4777,14 @@ function Copy-ItemsToDirectory {
     $copiedCount = 0
     $skippedCount = 0
     $errorCount = 0
+    $progress = $null
+    if (-not $AssumeYes) {
+        $progress = New-OperationProgress -Operation 'Copy' -TotalItems $summary.Count -TotalBytes $summary.Bytes
+    }
     for ($itemIndex = 0; $itemIndex -lt $Items.Count; $itemIndex++) {
         $item = $Items[$itemIndex]
         if (-not $AssumeYes) {
-            Show-ProgressDialog -Operation 'Copy' -CurrentItem $item.FullName -Index ($itemIndex + 1) -Total $Items.Count
+            Show-ProgressDialog -Operation 'Copy' -CurrentItem $item.FullName -Index ($itemIndex + 1) -Total $Items.Count -Progress $progress
             if (Test-CancelKeyPending) {
                 Show-Message -Message ('Copy canceled. Copied {0}, skipped {1}, errors {2}.' -f $copiedCount, $skippedCount, $errorCount)
                 return $false
@@ -4187,17 +4792,18 @@ function Copy-ItemsToDirectory {
         }
         $target = Join-Path -Path $DestinationDirectory -ChildPath $item.Name
         if ($item.IsDirectory) {
-            $result = Copy-DirectorySafe -Source $item.FullName -Destination $target -OverwritePolicy ([ref]$overwritePolicy) -AssumeYes $AssumeYes
+            $result = Copy-DirectorySafe -Source $item.FullName -Destination $target -OverwritePolicy ([ref]$overwritePolicy) -AssumeYes $AssumeYes -Progress $progress
         }
         else {
-            $result = Copy-FileSafe -Source $item.FullName -Destination $target -OverwritePolicy ([ref]$overwritePolicy) -AssumeYes $AssumeYes
+            $result = Copy-FileSafe -Source $item.FullName -Destination $target -OverwritePolicy ([ref]$overwritePolicy) -AssumeYes $AssumeYes -Progress $progress
         }
         if ($result -eq 'Cancel') {
+            Show-Message -Message ('Copy canceled. Copied {0}, skipped {1}, errors {2}.' -f $copiedCount, $skippedCount, $errorCount)
             return $false
         }
         if ($result -eq 'Copied') { $copiedCount++ }
-        elseif ($result -eq 'Skipped') { $skippedCount++ }
-        elseif ($result -eq 'Error') { $errorCount++ }
+        elseif ($result -eq 'Skipped') { $skippedCount++; if ($null -ne $progress) { $progress.SkippedCount = $skippedCount } }
+        elseif ($result -eq 'Error') { $errorCount++; if ($null -ne $progress) { $progress.ErrorCount = $errorCount } }
     }
     if (-not $AssumeYes -and -not $script:NonInteractiveMode) {
         Show-Message -Message ('Copy complete. Copied {0}, skipped {1}, errors {2}.' -f $copiedCount, $skippedCount, $errorCount)
@@ -6505,6 +7111,25 @@ function Get-TopMenuHeadingAt {
     return -1
 }
 
+function Get-FunctionKeyZoneAt {
+    param(
+        [int]$X,
+        [int]$Y
+    )
+
+    if ($null -eq $script:RenderState.FunctionKeyZones) {
+        return $null
+    }
+
+    foreach ($zone in $script:RenderState.FunctionKeyZones) {
+        if ($Y -eq [int]$zone.Top -and $X -ge [int]$zone.Left -and $X -le [int]$zone.Right) {
+            return $zone
+        }
+    }
+
+    return $null
+}
+
 function Get-DropdownItemAt {
     param(
         [int]$X,
@@ -6610,7 +7235,7 @@ function Invoke-TopMenuAction {
         'ReverseSort' { $script:Config.ReverseSort = -not [bool]$script:Config.ReverseSort; Refresh-Panel -Panel $script:State.LeftPanel; Refresh-Panel -Panel $script:State.RightPanel }
         'Filter' { Show-FilterDialog -Panel $panel }
         'Reread' { Refresh-Panel -Panel $panel }
-        'DriveList' { [void](Set-PanelLocalPath -Panel $panel -Path $script:DriveProviderPath) }
+        'DriveList' { [void](Select-DriveForPanel -Panel $panel) }
         'Bookmarks' { Show-BookmarkMenu }
         'Back' { Navigate-Parent }
         'View' { Invoke-View }
@@ -7188,7 +7813,7 @@ function Invoke-Edit {
         if (-not [System.IO.Path]::IsPathRooted($target)) {
             $target = Join-Path -Path $active.Path -ChildPath $target
         }
-        $script:State.CommandLine = ''
+        Clear-CommandLine
     }
     else {
         $current = Get-CurrentItem -Panel $active
@@ -7215,7 +7840,7 @@ function Invoke-EnteredCommandLine {
     }
 
     $command = $script:State.CommandLine
-    $script:State.CommandLine = ''
+    Clear-CommandLine
     $script:Config.CommandHistory += $command
     if (-not $script:NonInteractiveMode) {
         [void](Save-AppConfig)
@@ -7236,7 +7861,12 @@ function Enter-CurrentItem {
         return
     }
 
-    if ($item.IsParent -or $item.IsDrive -or $item.IsDirectory) {
+    if ($item.IsParent) {
+        [void](Set-PanelLocalPath -Panel $panel -Path $item.FullName -SelectPath $panel.Path)
+        return
+    }
+
+    if ($item.IsDrive -or $item.IsDirectory) {
         [void](Set-PanelLocalPath -Panel $panel -Path $item.FullName)
         return
     }
@@ -7270,11 +7900,12 @@ function Navigate-Parent {
         return
     }
     try {
+        $oldPath = $panel.Path
         $parent = Split-Path -Path $panel.Path -Parent
         if ([string]::IsNullOrWhiteSpace($parent)) {
             $parent = $script:DriveProviderPath
         }
-        [void](Set-PanelLocalPath -Panel $panel -Path $parent)
+        [void](Set-PanelLocalPath -Panel $panel -Path $parent -SelectPath $oldPath)
     }
     catch {
         [void](Set-PanelLocalPath -Panel $panel -Path $script:DriveProviderPath)
@@ -7356,6 +7987,7 @@ function Set-MouseEventLocationFields {
     $zoneKind = 'Other'
     $panelName = $null
     $rowIndex = $null
+    $functionKey = ''
 
     $layout = $script:RenderState.LastLayout
     if ($null -ne $layout) {
@@ -7369,6 +8001,12 @@ function Set-MouseEventLocationFields {
 
     if ((Get-TopMenuHeadingAt -X $MouseEvent.X -Y $MouseEvent.Y) -ge 0) {
         $zoneKind = 'TopMenu'
+    }
+
+    $functionZone = Get-FunctionKeyZoneAt -X $MouseEvent.X -Y $MouseEvent.Y
+    if ($null -ne $functionZone) {
+        $zoneKind = 'FunctionKeyBar'
+        $functionKey = [string]$functionZone.Key
     }
 
     $zone = Get-PanelZoneAt -X $MouseEvent.X -Y $MouseEvent.Y
@@ -7405,6 +8043,7 @@ function Set-MouseEventLocationFields {
     Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ZoneKind' -Value $zoneKind
     Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'PanelName' -Value $panelName
     Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'RowIndex' -Value $rowIndex
+    Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'FunctionKey' -Value $functionKey
 }
 
 function Initialize-MouseEventFields {
@@ -7427,6 +8066,7 @@ function Initialize-MouseEventFields {
         ZoneKind = $null
         PanelName = $null
         RowIndex = $null
+        FunctionKey = ''
         ActionTaken = 'Ignored'
     }
     foreach ($key in $defaults.Keys) {
@@ -7554,7 +8194,7 @@ function Write-MouseEventDebugLog {
         }
     }
 
-    Write-AppLog -Level 'INFO' -Message ('MouseEvent backend={0} x={1} y={2} down={3} up={4} click={5} dbl={6} nativeDbl={7} syntheticDbl={8} suppressed={9} elapsedMs={10} zone={11} panel={12} row={13} item={14} action={15} wheel={16} state=0x{17:X8} flags=0x{18:X8}' -f $MouseEvent.Backend, $MouseEvent.X, $MouseEvent.Y, $MouseEvent.ButtonDown, $MouseEvent.ButtonUp, $MouseEvent.Click, $MouseEvent.DoubleClick, $MouseEvent.NativeDoubleClick, $MouseEvent.SyntheticDoubleClick, $MouseEvent.SuppressedDuplicateClick, $MouseEvent.ClickElapsedMs, $MouseEvent.ZoneKind, $MouseEvent.PanelName, $MouseEvent.RowIndex, $selectedName, $Action, $MouseEvent.WheelDelta, [uint32]$MouseEvent.ButtonState, [uint32]$MouseEvent.EventFlags)
+    Write-AppLog -Level 'INFO' -Message ('MouseEvent backend={0} x={1} y={2} down={3} up={4} click={5} dbl={6} nativeDbl={7} syntheticDbl={8} suppressed={9} elapsedMs={10} zone={11} key={12} panel={13} row={14} item={15} action={16} wheel={17} state=0x{18:X8} flags=0x{19:X8}' -f $MouseEvent.Backend, $MouseEvent.X, $MouseEvent.Y, $MouseEvent.ButtonDown, $MouseEvent.ButtonUp, $MouseEvent.Click, $MouseEvent.DoubleClick, $MouseEvent.NativeDoubleClick, $MouseEvent.SyntheticDoubleClick, $MouseEvent.SuppressedDuplicateClick, $MouseEvent.ClickElapsedMs, $MouseEvent.ZoneKind, $MouseEvent.FunctionKey, $MouseEvent.PanelName, $MouseEvent.RowIndex, $selectedName, $Action, $MouseEvent.WheelDelta, [uint32]$MouseEvent.ButtonState, [uint32]$MouseEvent.EventFlags)
 }
 
 function Handle-MouseEvent {
@@ -7597,6 +8237,25 @@ function Handle-MouseEvent {
         Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ActionTaken' -Value 'Ignored'
         Write-MouseEventDebugLog -MouseEvent $MouseEvent -Action 'Ignored'
         Show-TopPullDownMenu -InitialIndex $menuIndex
+        return
+    }
+
+    $functionZone = Get-FunctionKeyZoneAt -X $MouseEvent.X -Y $MouseEvent.Y
+    if ($null -ne $functionZone) {
+        Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ZoneKind' -Value 'FunctionKeyBar'
+        Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'FunctionKey' -Value ([string]$functionZone.Key)
+        $script:LastMouseClick = $null
+        if ([bool]$MouseEvent.Click -and -not [bool]$MouseEvent.ButtonUp) {
+            $action = ('FunctionKey:{0}' -f $functionZone.Key)
+            Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ActionTaken' -Value $action
+            Write-MouseEventDebugLog -MouseEvent $MouseEvent -Action $action
+            $keyInfo = New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]$functionZone.ConsoleKey)
+            Handle-Key -KeyInfo $keyInfo
+        }
+        else {
+            Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ActionTaken' -Value 'Ignored'
+            Write-MouseEventDebugLog -MouseEvent $MouseEvent -Action 'Ignored'
+        }
         return
     }
 
@@ -7661,6 +8320,16 @@ function Handle-Key {
         [void](Move-PanelHistory -Panel $panel -Delta 1)
         return
     }
+    if ($alt -and $KeyInfo.Key -eq [ConsoleKey]::F1) {
+        $script:State.ActivePanel = 'Left'
+        [void](Select-DriveForPanel -Panel $script:State.LeftPanel)
+        return
+    }
+    if ($alt -and $KeyInfo.Key -eq [ConsoleKey]::F2) {
+        $script:State.ActivePanel = 'Right'
+        [void](Select-DriveForPanel -Panel $script:State.RightPanel)
+        return
+    }
     if ($control -and $KeyInfo.Key -eq [ConsoleKey]::P) {
         Move-Selection -Panel $panel -Delta -1 -VisibleRows $script:State.VisibleRows
         return
@@ -7690,6 +8359,28 @@ function Handle-Key {
         return
     }
 
+    Normalize-CommandCursor
+    $commandHasText = ($script:State.CommandLine.Length -gt 0)
+    if ($control -and $KeyInfo.Key -eq [ConsoleKey]::A) {
+        Move-CommandCursorHome
+        return
+    }
+    if ($control -and $KeyInfo.Key -eq [ConsoleKey]::V) {
+        Paste-CommandLineText
+        return
+    }
+    if ($commandHasText) {
+        switch ($KeyInfo.Key) {
+            ([ConsoleKey]::LeftArrow) { Move-CommandCursorLeft; return }
+            ([ConsoleKey]::RightArrow) { Move-CommandCursorRight; return }
+            ([ConsoleKey]::Home) { Move-CommandCursorHome; return }
+            ([ConsoleKey]::End) { Move-CommandCursorEnd; return }
+            ([ConsoleKey]::Backspace) { Remove-CommandLineCharacterBeforeCursor; return }
+            ([ConsoleKey]::Delete) { Remove-CommandLineCharacterAtCursor; return }
+            ([ConsoleKey]::Escape) { Clear-CommandLine; return }
+        }
+    }
+
     switch ($KeyInfo.Key) {
         ([ConsoleKey]::Tab) {
             if ($script:State.ActivePanel -eq 'Left') { $script:State.ActivePanel = 'Right' } else { $script:State.ActivePanel = 'Left' }
@@ -7706,13 +8397,10 @@ function Handle-Key {
             }
         }
         ([ConsoleKey]::Backspace) {
-            if ($script:State.CommandLine.Length -gt 0) {
-                $script:State.CommandLine = $script:State.CommandLine.Substring(0, $script:State.CommandLine.Length - 1)
-            }
-            else {
-                Navigate-Parent
-            }
+            Navigate-Parent
         }
+        ([ConsoleKey]::Delete) { }
+        ([ConsoleKey]::Escape) { Clear-CommandLine }
         ([ConsoleKey]::Insert) { Toggle-MarkCurrent -Panel $panel -MoveDown $true }
         ([ConsoleKey]::Spacebar) { Toggle-MarkCurrent -Panel $panel -MoveDown $false }
         ([ConsoleKey]::F1) { Show-HelpViewer }
@@ -7740,7 +8428,7 @@ function Handle-Key {
                 Invert-Selection -Panel $panel
             }
             elseif (-not [char]::IsControl($KeyInfo.KeyChar)) {
-                $script:State.CommandLine += [string]$KeyInfo.KeyChar
+                Insert-CommandLineText -Text ([string]$KeyInfo.KeyChar)
             }
         }
     }
@@ -7754,6 +8442,7 @@ function Initialize-State {
         RightPanel = $right
         ActivePanel = 'Left'
         CommandLine = ''
+        CommandCursor = 0
         ExitRequested = $false
         VisibleRows = 10
     }
@@ -7966,6 +8655,24 @@ function Invoke-InputParserSelfTestCases {
     }
     if (-not (Test-SelfCondition -Name 'vt key shift modifier does not throw' -Condition $shiftModifierOk -Results $Results)) { $failed++ }
 
+    $altFunctionOk = $false
+    try {
+        $altF1Info = Try-ConvertVtKeySequence -Sequence '[1;3P'
+        $altF2Info = Try-ConvertVtKeySequence -Sequence '[1;3Q'
+        $altFunctionOk = (
+            $null -ne $altF1Info -and
+            $null -ne $altF2Info -and
+            $altF1Info.Key -eq [System.ConsoleKey]::F1 -and
+            $altF2Info.Key -eq [System.ConsoleKey]::F2 -and
+            (($altF1Info.Modifiers -band [ConsoleModifiers]::Alt) -ne 0) -and
+            (($altF2Info.Modifiers -band [ConsoleModifiers]::Alt) -ne 0)
+        )
+    }
+    catch {
+        $altFunctionOk = $false
+    }
+    if (-not (Test-SelfCondition -Name 'vt key alt f1 f2 modifiers' -Condition $altFunctionOk -Results $Results)) { $failed++ }
+
     return $failed
 }
 
@@ -8026,6 +8733,14 @@ function Run-SelfTest {
         $copyOverwriteResult = Copy-FileSafe -Source $copyOverwriteSource -Destination $copyOverwriteDest -OverwritePolicy ([ref]$overwritePolicy) -AssumeYes $true
         $copyOverwriteText = Get-Content -LiteralPath $copyOverwriteDest -Raw -ErrorAction Stop
         if (-not (Test-SelfCondition -Name 'safe copy overwrite existing file' -Condition ($copyOverwriteResult -eq 'Copied' -and $copyOverwriteText -like '*copy overwrite new*' -and (Test-Path -LiteralPath $copyOverwriteSource)) -Results $results)) { $failed++ }
+
+        $copyProgressDest = Join-Path -Path $rightRoot -ChildPath 'copy_progress_dest.txt'
+        $copyProgressBytes = [long](Get-Item -LiteralPath $copyOverwriteSource -ErrorAction Stop).Length
+        $copyProgress = New-OperationProgress -Operation 'Copy' -TotalItems 1 -TotalBytes $copyProgressBytes
+        $overwritePolicy = 'OverwriteAll'
+        $copyProgressResult = Copy-FileSafe -Source $copyOverwriteSource -Destination $copyProgressDest -OverwritePolicy ([ref]$overwritePolicy) -AssumeYes $true -Progress $copyProgress
+        $copyProgressOk = ($copyProgressResult -eq 'Copied' -and [long]$copyProgress.BytesCopied -eq $copyProgressBytes -and (Test-Path -LiteralPath $copyProgressDest))
+        if (-not (Test-SelfCondition -Name 'copy progress streaming bytes' -Condition $copyProgressOk -Results $results)) { $failed++ }
 
         $copyRollbackSource = Join-Path -Path $leftRoot -ChildPath 'copy_rollback_source.txt'
         $copyRollbackDest = Join-Path -Path $rightRoot -ChildPath 'copy_rollback_dest.txt'
@@ -8210,7 +8925,7 @@ function Run-SelfTest {
                 $wideTopBarText -like '*Owner: Zolnai Zsolt <zzsolt@gmail.com>*' -and
                 $wideTopBarText -like '*Input:*' -and
                 $narrowTopBarText -like '*Zolnai Zsolt*' -and
-                $aboutText -like '*Version: 0.7.0*' -and
+                $aboutText -like '*Version: 0.8.0*' -and
                 $aboutText -like '*Repository: https://github.com/zzsolt/console_commander*' -and
                 $helpText -like '*Email: zzsolt@gmail.com*'
             )
@@ -8219,6 +8934,86 @@ function Run-SelfTest {
         finally {
             $script:Config.OwnerName = $oldOwnerName
             $script:Config.OwnerEmail = $oldOwnerEmail
+        }
+
+        $oldUseColorForFunctionKeys = $script:Config.UseColor
+        $oldLastMouseClickForFunctionKeys = $script:LastMouseClick
+        try {
+            $script:Config.UseColor = $true
+            [void](Build-AppScreenLines -Width 120 -Height 30)
+            $functionLayout = $script:RenderState.LastLayout
+            $functionZones = @($script:RenderState.FunctionKeyZones)
+            $expectedFunctionKeys = @('F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10')
+            $functionZonesOk = ($functionZones.Count -eq $expectedFunctionKeys.Count)
+            $previousRight = -1
+            foreach ($expectedKey in $expectedFunctionKeys) {
+                $zone = $null
+                foreach ($candidateZone in $functionZones) {
+                    if ([string]$candidateZone.Key -eq $expectedKey) {
+                        $zone = $candidateZone
+                        break
+                    }
+                }
+                if ($null -eq $zone) {
+                    $functionZonesOk = $false
+                    continue
+                }
+                $midX = [int][Math]::Floor(([int]$zone.Left + [int]$zone.Right) / 2)
+                $lookupZone = Get-FunctionKeyZoneAt -X $midX -Y ([int]$zone.Top)
+                $zoneKeyInfo = New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]$zone.ConsoleKey)
+                if (
+                    [int]$zone.Left -lt 0 -or
+                    [int]$zone.Right -lt [int]$zone.Left -or
+                    [int]$zone.Right -ge 120 -or
+                    [int]$zone.Top -ne [int]$functionLayout.FunctionKeyRow -or
+                    [System.ConsoleKey]$zone.ConsoleKey -ne ([System.ConsoleKey]$expectedKey) -or
+                    $null -eq $lookupZone -or
+                    [string]$lookupZone.Key -ne $expectedKey -or
+                    $zoneKeyInfo.Key -ne ([System.ConsoleKey]$expectedKey) -or
+                    [int]$zone.Left -le $previousRight
+                ) {
+                    $functionZonesOk = $false
+                }
+                $previousRight = [int]$zone.Right
+            }
+            if (-not (Test-SelfCondition -Name 'function key hit zones' -Condition $functionZonesOk -Results $results)) { $failed++ }
+
+            $script:Config.UseColor = $false
+            [void](Build-AppScreenLines -Width 60 -Height 25)
+            $narrowFunctionZones = @($script:RenderState.FunctionKeyZones)
+            $narrowFunctionZonesOk = ($narrowFunctionZones.Count -gt 0 -and $narrowFunctionZones.Count -lt 10)
+            $previousRight = -1
+            foreach ($zone in $narrowFunctionZones) {
+                if ([int]$zone.Left -lt 0 -or [int]$zone.Right -ge 60 -or [int]$zone.Left -le $previousRight -or [int]$zone.Top -ne [int]$script:RenderState.LastLayout.FunctionKeyRow) {
+                    $narrowFunctionZonesOk = $false
+                }
+                $previousRight = [int]$zone.Right
+            }
+            if (-not (Test-SelfCondition -Name 'function key narrow hit zones' -Condition $narrowFunctionZonesOk -Results $results)) { $failed++ }
+
+            $script:Config.UseColor = $true
+            [void](Build-AppScreenLines -Width 120 -Height 30)
+            $f5Zone = $null
+            foreach ($zone in @($script:RenderState.FunctionKeyZones)) {
+                if ([string]$zone.Key -eq 'F5') {
+                    $f5Zone = $zone
+                    break
+                }
+            }
+            $script:LastMouseClick = [pscustomobject]@{ X = 5; Y = 5; Button = 1; Time = (Get-Date).AddMilliseconds(-200); ZoneKind = 'PanelRow'; PanelName = 'Left'; RowIndex = 0 }
+            $functionClickStateOk = $false
+            if ($null -ne $f5Zone) {
+                $f5X = [int][Math]::Floor(([int]$f5Zone.Left + [int]$f5Zone.Right) / 2)
+                $functionClickEvent = New-InputMouseEvent -X $f5X -Y ([int]$f5Zone.Top) -ButtonState ([uint32]0) -ButtonDown $true -Click $true -Backend 'VT'
+                [void](Update-MouseClickState -MouseEvent $functionClickEvent)
+                $functionClickStateOk = ($null -eq $script:LastMouseClick -and [string]$functionClickEvent.ZoneKind -eq 'FunctionKeyBar' -and [string]$functionClickEvent.FunctionKey -eq 'F5' -and -not [bool]$functionClickEvent.DoubleClick)
+            }
+            if (-not (Test-SelfCondition -Name 'function key click clears panel double click state' -Condition $functionClickStateOk -Results $results)) { $failed++ }
+        }
+        finally {
+            $script:Config.UseColor = $oldUseColorForFunctionKeys
+            $script:LastMouseClick = $oldLastMouseClickForFunctionKeys
+            [void](Build-AppScreenLines -Width 80 -Height 25)
         }
 
         $oldBorderStyle = $script:Config.BorderStyle
@@ -8303,6 +9098,97 @@ function Run-SelfTest {
             $commandLineText = Convert-RenderLineToPlainText -Line $screenLines[$layoutForCommand.CommandLineRow]
             $commandRowOk = ($layoutForCommand.CommandLineRow -eq ($layoutForCommand.FunctionKeyRow - 1) -and $layoutForCommand.CommandLineRow -gt $layoutForCommand.BottomBorderRow -and $layoutForCommand.CommandLineRow -ne $layoutForCommand.FunctionKeyRow -and $commandLineText -like '*Cmd:*' -and $commandLineText -like '*>*')
             if (-not (Test-SelfCondition -Name 'command row visible and separated' -Condition $commandRowOk -Results $results)) { $failed++ }
+
+            $script:State.CommandLine = 'abcd'
+            $script:State.CommandCursor = 2
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]::Delete))
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]'X') -Key ([System.ConsoleKey]::X))
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]::LeftArrow))
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]::Backspace))
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]::End))
+            $commandEditorOk = ($script:State.CommandLine -eq 'aXd' -and $script:State.CommandCursor -eq 3)
+            if (-not (Test-SelfCondition -Name 'command line delete cursor editing' -Condition $commandEditorOk -Results $results)) { $failed++ }
+
+            $script:State.CommandLine = 'long-command-tail'
+            $script:State.CommandCursor = $script:State.CommandLine.Length
+            $narrowCommandLines = Build-AppScreenLines -Width 60 -Height 25
+            $narrowCommandLayout = $script:RenderState.LastLayout
+            $narrowCommandText = Convert-RenderLineToPlainText -Line $narrowCommandLines[$narrowCommandLayout.CommandLineRow]
+            $commandScrollOk = ($narrowCommandText -like '*Cmd:*' -and $narrowCommandText -like '*>*' -and $script:RenderState.CommandCursorLeft -lt 60)
+            if (-not (Test-SelfCondition -Name 'command line cursor render scroll' -Condition $commandScrollOk -Results $results)) { $failed++ }
+
+            $parentPanel = New-PanelState -Name 'ParentLeft' -Path $enterChild
+            $parentRight = New-PanelState -Name 'ParentRight' -Path $rightRoot
+            Refresh-Panel -Panel $parentPanel
+            Refresh-Panel -Panel $parentRight
+            $script:State = @{
+                LeftPanel = $parentPanel
+                RightPanel = $parentRight
+                ActivePanel = 'Left'
+                CommandLine = ''
+                CommandCursor = 0
+                ExitRequested = $false
+                VisibleRows = 10
+            }
+            Navigate-Parent
+            $selectedAfterParent = Get-CurrentItem -Panel $script:State.LeftPanel
+            $parentSelectionOk = ($script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $leftRoot) -and $null -ne $selectedAfterParent -and $selectedAfterParent.Name -eq 'enter_child')
+            if (-not (Test-SelfCondition -Name 'parent navigation selects exited child' -Condition $parentSelectionOk -Results $results)) { $failed++ }
+
+            $backspacePanel = New-PanelState -Name 'BackspaceLeft' -Path $enterChild
+            $script:State = @{
+                LeftPanel = $backspacePanel
+                RightPanel = $parentRight
+                ActivePanel = 'Left'
+                CommandLine = ''
+                CommandCursor = 0
+                ExitRequested = $false
+                VisibleRows = 10
+            }
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Backspace))
+            $selectedAfterBackspace = Get-CurrentItem -Panel $script:State.LeftPanel
+            $backspaceParentOk = ($script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $leftRoot) -and $null -ne $selectedAfterBackspace -and $selectedAfterBackspace.Name -eq 'enter_child')
+            if (-not (Test-SelfCondition -Name 'backspace parent selects exited child' -Condition $backspaceParentOk -Results $results)) { $failed++ }
+
+            $parentItemPanel = New-PanelState -Name 'ParentItemLeft' -Path $enterChild
+            Refresh-Panel -Panel $parentItemPanel
+            $script:State = @{
+                LeftPanel = $parentItemPanel
+                RightPanel = $parentRight
+                ActivePanel = 'Left'
+                CommandLine = ''
+                CommandCursor = 0
+                ExitRequested = $false
+                VisibleRows = 10
+            }
+            Set-SelectionAbsolute -Panel $script:State.LeftPanel -Index 0 -VisibleRows 10
+            Enter-CurrentItem
+            $selectedAfterParentItem = Get-CurrentItem -Panel $script:State.LeftPanel
+            $parentItemOk = ($script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $leftRoot) -and $null -ne $selectedAfterParentItem -and $selectedAfterParentItem.Name -eq 'enter_child')
+            if (-not (Test-SelfCondition -Name 'parent item enter selects exited child' -Condition $parentItemOk -Results $results)) { $failed++ }
+
+            $driveItems = @(Get-AvailableDriveItems)
+            $driveItemsOk = ($driveItems.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$driveItems[0].Root) -and $null -ne $driveItems[0].Type -and $null -ne $driveItems[0].IsReady)
+            if (-not (Test-SelfCondition -Name 'drive items enumerate safely' -Condition $driveItemsOk -Results $results)) { $failed++ }
+
+            $fakeUnavailableDrive = [pscustomobject]@{ Root = 'Z:\'; Type = 'Unknown'; IsReady = $false; Label = 'No media'; FreeBytes = $null; TotalBytes = $null }
+            $beforeUnavailablePath = $script:State.LeftPanel.Path
+            $unavailableDriveResult = Set-PanelDriveSelection -Panel $script:State.LeftPanel -DriveItem $fakeUnavailableDrive
+            $unavailableDriveOk = (-not $unavailableDriveResult -and $script:State.LeftPanel.Path -eq $beforeUnavailablePath -and (Format-DriveSizeInfo -DriveItem $fakeUnavailableDrive) -eq 'unavailable')
+            if (-not (Test-SelfCondition -Name 'unavailable drive preserves panel path' -Condition $unavailableDriveOk -Results $results)) { $failed++ }
+
+            $readyDrive = $null
+            foreach ($driveItem in $driveItems) {
+                if ([bool]$driveItem.IsReady -and (Test-Path -LiteralPath ([string]$driveItem.Root) -PathType Container)) {
+                    $readyDrive = $driveItem
+                    break
+                }
+            }
+            $readyDriveOk = $true
+            if ($null -ne $readyDrive) {
+                $readyDriveOk = (Set-PanelDriveSelection -Panel $script:State.LeftPanel -DriveItem $readyDrive -and $script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path ([string]$readyDrive.Root)))
+            }
+            if (-not (Test-SelfCondition -Name 'available drive sets panel path' -Condition $readyDriveOk -Results $results)) { $failed++ }
         }
         finally {
             $script:State = $oldStateForInputTests
