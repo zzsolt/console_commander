@@ -5,6 +5,8 @@ param(
     [switch]$Ascii,
     [string]$LogPath,
     [string]$ConfigPath,
+    [string]$OwnerName,
+    [string]$OwnerEmail,
     [switch]$RunSelfTest,
     [switch]$SafeDelete,
     [switch]$MouseDiagnostics,
@@ -17,6 +19,14 @@ $ErrorActionPreference = 'Continue'
 # English: Application constants and global state.
 # Magyar: Alkalmazas konstansok es globalis allapot.
 $script:ApplicationName = 'console_commander'
+$script:AppMetadata = @{
+    Name = 'console_commander'
+    Version = '0.7.0'
+    OwnerName = 'Zolnai Zsolt'
+    OwnerEmail = 'zzsolt@gmail.com'
+    Repository = 'https://github.com/zzsolt/console_commander'
+    Description = 'Console-only dual-pane file manager for Windows PowerShell'
+}
 $script:DriveProviderPath = '__CONSOLE_COMMANDER_DRIVES__'
 $script:InternalClipboard = @()
 $script:ZipAssembliesLoaded = $false
@@ -182,6 +192,82 @@ function Merge-HashtableDefaults {
     return $Target
 }
 
+function Get-AppMetadataValue {
+    param(
+        [string]$Name
+    )
+
+    if ($script:AppMetadata.ContainsKey($Name)) {
+        return [string]$script:AppMetadata[$Name]
+    }
+    return ''
+}
+
+function Get-AppOwnerName {
+    if ($null -ne $script:Config -and -not [string]::IsNullOrWhiteSpace([string]$script:Config.OwnerName)) {
+        return [string]$script:Config.OwnerName
+    }
+    return Get-AppMetadataValue -Name 'OwnerName'
+}
+
+function Get-AppOwnerEmail {
+    if ($null -ne $script:Config -and -not [string]::IsNullOrWhiteSpace([string]$script:Config.OwnerEmail)) {
+        return [string]$script:Config.OwnerEmail
+    }
+    return Get-AppMetadataValue -Name 'OwnerEmail'
+}
+
+function Get-AppRuntimeText {
+    $psVersion = [string]$PSVersionTable.PSVersion
+    $hostName = [string]$Host.Name
+    if ([string]::IsNullOrWhiteSpace($psVersion)) {
+        $psVersion = 'Unknown'
+    }
+    if ([string]::IsNullOrWhiteSpace($hostName)) {
+        $hostName = 'Unknown'
+    }
+    return ('Windows PowerShell {0}; Host: {1}; Console: {2}' -f $psVersion, $script:HostKind, $hostName)
+}
+
+function Get-OwnerTopBarTextCandidates {
+    $name = Get-AppOwnerName
+    $email = Get-AppOwnerEmail
+    $candidates = @()
+
+    if (-not [string]::IsNullOrWhiteSpace($name) -and -not [string]::IsNullOrWhiteSpace($email)) {
+        $candidates += ('Owner: {0} <{1}>' -f $name, $email)
+        $candidates += ('{0} <{1}>' -f $name, $email)
+        $candidates += $name
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($name)) {
+        $candidates += ('Owner: {0}' -f $name)
+        $candidates += $name
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($email)) {
+        $candidates += ('Owner: <{0}>' -f $email)
+        $candidates += $email
+    }
+
+    $unique = @()
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and $unique -notcontains $candidate) {
+            $unique += $candidate
+        }
+    }
+    return $unique
+}
+
+function Get-AboutLines {
+    return @(
+        (Get-AppMetadataValue -Name 'Name'),
+        ('Version: {0}' -f (Get-AppMetadataValue -Name 'Version')),
+        ('Owner: {0}' -f (Get-AppOwnerName)),
+        ('Email: {0}' -f (Get-AppOwnerEmail)),
+        ('Repository: {0}' -f (Get-AppMetadataValue -Name 'Repository')),
+        ('Runtime: {0}' -f (Get-AppRuntimeText))
+    )
+}
+
 function New-DefaultConfig {
     $userMenu = @(
         @{
@@ -242,6 +328,8 @@ function New-DefaultConfig {
         CompactMode = 'Auto'
         ColorTheme = 'Classic blue'
         VtMouseMode = $false
+        OwnerName = (Get-AppMetadataValue -Name 'OwnerName')
+        OwnerEmail = (Get-AppMetadataValue -Name 'OwnerEmail')
         Bookmarks = @()
         CommandHistory = @()
         PanelizeCommands = @()
@@ -348,6 +436,18 @@ function Initialize-ConfigRuntime {
         $script:Config.BorderStyle = 'ASCII'
         $script:Config.UseAscii = $true
     }
+    if ([string]::IsNullOrWhiteSpace([string]$script:Config.OwnerName)) {
+        $script:Config.OwnerName = Get-AppMetadataValue -Name 'OwnerName'
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$script:Config.OwnerEmail)) {
+        $script:Config.OwnerEmail = Get-AppMetadataValue -Name 'OwnerEmail'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OwnerName)) {
+        $script:Config.OwnerName = $OwnerName
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OwnerEmail)) {
+        $script:Config.OwnerEmail = $OwnerEmail
+    }
     $normalizedMouseMode = [string]$script:Config.MouseMode
     if ($normalizedMouseMode -eq 'KeyboardOnly') {
         $normalizedMouseMode = 'Disabled'
@@ -376,6 +476,8 @@ function Show-StartupHelp {
         '  -Ascii               Force ASCII borders',
         '  -LogPath <string>    Log file path',
         '  -ConfigPath <string> Config JSON path',
+        '  -OwnerName <string>  Override owner display name for this run',
+        '  -OwnerEmail <string> Override owner email for this run',
         '  -RunSelfTest         Run non-interactive smoke tests',
         '  -SafeDelete          Move deleted items to application trash when possible',
         '  -MouseDiagnostics    Show mouse input diagnostics and event test loop',
@@ -1438,6 +1540,11 @@ function Add-MenuBarToLines {
     $menus = @('Left', 'File', 'Command', 'Options', 'Right')
     $script:RenderState.TopMenuZones = @()
 
+    $menuLeft = 1
+    $minimumSlotWidth = 6
+    $minimumMenuRight = $menuLeft + ($menus.Count * $minimumSlotWidth) - 1
+    $rightContentLeft = $width
+
     $inputFull = ' ' + (Get-InputStatusText) + ' '
     $inputShort = ' ' + (Get-ShortInputStatusText) + ' '
     $inputText = ''
@@ -1448,14 +1555,32 @@ function Add-MenuBarToLines {
         $inputText = $inputShort
     }
 
-    $statusLeft = $width
-    if (-not [string]::IsNullOrWhiteSpace($inputText) -and $inputText.Length -lt ($width - 14)) {
-        $statusLeft = $width - $inputText.Length
-        Add-RenderSegment -Line $line -Left $statusLeft -Text $inputText -Width $inputText.Length -Foreground $menuFg -Background $menuBg
+    $inputLeft = $width
+    if (-not [string]::IsNullOrWhiteSpace($inputText)) {
+        $candidateLeft = $width - $inputText.Length
+        if ($candidateLeft -gt ($minimumMenuRight + 1)) {
+            $inputLeft = $candidateLeft
+            $rightContentLeft = $inputLeft
+            Add-RenderSegment -Line $line -Left $inputLeft -Text $inputText -Width $inputText.Length -Foreground $menuFg -Background $menuBg
+        }
     }
 
-    $menuLeft = 1
-    $menuRight = [Math]::Max($menuLeft, $statusLeft - 2)
+    $ownerText = ''
+    foreach ($candidate in (Get-OwnerTopBarTextCandidates)) {
+        $candidateText = ' ' + $candidate + ' '
+        $candidateLeft = $rightContentLeft - $candidateText.Length
+        if ($candidateLeft -gt ($minimumMenuRight + 1)) {
+            $ownerText = $candidateText
+            $ownerLeft = $candidateLeft
+            break
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ownerText)) {
+        Add-RenderSegment -Line $line -Left $ownerLeft -Text $ownerText -Width $ownerText.Length -Foreground $menuFg -Background $menuBg
+        $rightContentLeft = $ownerLeft
+    }
+
+    $menuRight = [Math]::Max($menuLeft, $rightContentLeft - 2)
     $menuAreaWidth = $menuRight - $menuLeft + 1
     $slotWidth = [int][Math]::Floor($menuAreaWidth / $menus.Count)
     if ($slotWidth -lt 6) {
@@ -6102,9 +6227,14 @@ function Compare-Directories {
     }
 }
 
-function Show-HelpViewer {
-    $lines = @(
+function Get-HelpLines {
+    return @(
         'console_commander help',
+        '',
+        'Owner:',
+        ('  Owner: {0}' -f (Get-AppOwnerName)),
+        ('  Email: {0}' -f (Get-AppOwnerEmail)),
+        ('  Repository: {0}' -f (Get-AppMetadataValue -Name 'Repository')),
         '',
         'Navigation:',
         '  Tab switch active panel',
@@ -6145,6 +6275,10 @@ function Show-HelpViewer {
         '  The editor is intentionally simple and blocks binary editing.',
         '  ZIP browsing is a flat virtual list; extraction and creation are implemented.'
     )
+}
+
+function Show-HelpViewer {
+    $lines = Get-HelpLines
     Show-TextViewer -Lines $lines -Title 'Help'
 }
 
@@ -6595,7 +6729,7 @@ function Invoke-TopMenuAction {
         'SaveConfig' { if (Save-AppConfig) { Show-Message -Message 'Config saved.' } else { Show-Message -Message 'Config save failed.' } }
         'ReloadConfig' { $script:Config = Load-AppConfig; Initialize-ConfigRuntime; Refresh-Panel -Panel $script:State.LeftPanel; Refresh-Panel -Panel $script:State.RightPanel; Show-Message -Message 'Config reloaded.' }
         'ShowStubs' { Show-StubMenu }
-        'About' { Show-Message -Message 'Mouse backend auto-selects Win32 or VT when supported. Keyboard always remains available.' }
+        'About' { Show-TextViewer -Lines (Get-AboutLines) -Title 'About' }
     }
 
     if ($Menu.Target -eq 'Active') {
@@ -8060,6 +8194,33 @@ function Run-SelfTest {
         $layout = Get-ConsoleCommanderLayout -Width 80 -Height 25
         $layoutOk = ($layout.TopMenuRow -eq 0 -and $layout.CommandLineRow -eq 23 -and $layout.FunctionKeyRow -eq 24 -and $layout.UsableFileListHeight -gt 0)
         if (-not (Test-SelfCondition -Name 'tui layout calculator' -Condition $layoutOk -Results $results)) { $failed++ }
+
+        $oldOwnerName = $script:Config.OwnerName
+        $oldOwnerEmail = $script:Config.OwnerEmail
+        try {
+            $script:Config.OwnerName = 'Zolnai Zsolt'
+            $script:Config.OwnerEmail = 'zzsolt@gmail.com'
+            $wideLines = Build-AppScreenLines -Width 140 -Height 30
+            $wideTopBarText = Convert-RenderLineToPlainText -Line $wideLines[0]
+            $narrowLines = Build-AppScreenLines -Width 80 -Height 25
+            $narrowTopBarText = Convert-RenderLineToPlainText -Line $narrowLines[0]
+            $aboutText = [string]::Join("`n", [string[]](Get-AboutLines))
+            $helpText = [string]::Join("`n", [string[]](Get-HelpLines))
+            $ownerMetadataOk = (
+                $wideTopBarText -like '*Owner: Zolnai Zsolt <zzsolt@gmail.com>*' -and
+                $wideTopBarText -like '*Input:*' -and
+                $narrowTopBarText -like '*Zolnai Zsolt*' -and
+                $aboutText -like '*Version: 0.7.0*' -and
+                $aboutText -like '*Repository: https://github.com/zzsolt/console_commander*' -and
+                $helpText -like '*Email: zzsolt@gmail.com*'
+            )
+            if (-not (Test-SelfCondition -Name 'owner metadata topbar about help' -Condition $ownerMetadataOk -Results $results)) { $failed++ }
+        }
+        finally {
+            $script:Config.OwnerName = $oldOwnerName
+            $script:Config.OwnerEmail = $oldOwnerEmail
+        }
+
         $oldBorderStyle = $script:Config.BorderStyle
         $script:Config.BorderStyle = 'ASCII'
         $script:Config.UseAscii = $true
