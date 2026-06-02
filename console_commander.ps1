@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Continue'
 $script:ApplicationName = 'console_commander'
 $script:AppMetadata = @{
     Name = 'console_commander'
-    Version = '0.8.0'
+    Version = '0.8.1'
     OwnerName = 'Zolnai Zsolt'
     OwnerEmail = 'zzsolt@gmail.com'
     Repository = 'https://github.com/zzsolt/console_commander'
@@ -63,6 +63,7 @@ $script:RenderState = @{
     DropdownZones = @()
     DropdownMenuIndex = -1
     OpenTopMenuIndex = -1
+    VersionVisibleInTopBar = $false
     LastLayout = $null
 }
 
@@ -202,6 +203,14 @@ function Get-AppMetadataValue {
         return [string]$script:AppMetadata[$Name]
     }
     return ''
+}
+
+function Get-AppVersionText {
+    $version = Get-AppMetadataValue -Name 'Version'
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        return 'v?'
+    }
+    return ('v{0}' -f $version)
 }
 
 function Get-AppOwnerName {
@@ -1609,19 +1618,41 @@ function Add-MenuBarToLines {
         }
     }
 
+    $versionText = ' ' + (Get-AppVersionText) + ' '
+    $versionLeft = -1
     $ownerText = ''
+    $ownerLeft = -1
+
     foreach ($candidate in (Get-OwnerTopBarTextCandidates)) {
         $candidateText = ' ' + $candidate + ' '
-        $candidateLeft = $rightContentLeft - $candidateText.Length
-        if ($candidateLeft -gt ($minimumMenuRight + 1)) {
+        $candidateOwnerLeft = $rightContentLeft - $candidateText.Length
+        $candidateVersionLeft = $candidateOwnerLeft - $versionText.Length
+        if ($candidateVersionLeft -gt ($minimumMenuRight + 1)) {
             $ownerText = $candidateText
-            $ownerLeft = $candidateLeft
+            $ownerLeft = $candidateOwnerLeft
+            $versionLeft = $candidateVersionLeft
             break
         }
     }
+
+    if ($versionLeft -lt 0) {
+        $candidateVersionLeft = $rightContentLeft - $versionText.Length
+        if ($candidateVersionLeft -gt ($minimumMenuRight + 1)) {
+            $versionLeft = $candidateVersionLeft
+        }
+    }
+
+    if ($versionLeft -ge 0) {
+        Add-RenderSegment -Line $line -Left $versionLeft -Text $versionText -Width $versionText.Length -Foreground $menuFg -Background $menuBg
+        $rightContentLeft = $versionLeft
+        $script:RenderState.VersionVisibleInTopBar = $true
+    }
+    else {
+        $script:RenderState.VersionVisibleInTopBar = $false
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($ownerText)) {
         Add-RenderSegment -Line $line -Left $ownerLeft -Text $ownerText -Width $ownerText.Length -Foreground $menuFg -Background $menuBg
-        $rightContentLeft = $ownerLeft
     }
 
     $menuRight = [Math]::Max($menuLeft, $rightContentLeft - 2)
@@ -1939,7 +1970,20 @@ function Add-CommandLineToLines {
     $maxPrompt = [Math]::Max(8, $Layout.Width - $label.Length - 2)
     if ($maxPrompt -gt 42) { $maxPrompt = 42 }
     $prompt = (Get-ShortPromptPath -Path (Get-ActivePanel).Path -MaxLength $maxPrompt) + '>'
-    $commandWidth = [Math]::Max(1, $Layout.Width - $label.Length - $prompt.Length)
+    $versionFallbackText = ''
+    $versionFallbackLeft = -1
+    if (-not [bool]$script:RenderState.VersionVisibleInTopBar) {
+        $candidateVersionText = ' ' + (Get-AppVersionText) + ' '
+        if ($Layout.Width -gt ($label.Length + 12 + $candidateVersionText.Length)) {
+            $versionFallbackText = $candidateVersionText
+            $versionFallbackLeft = $Layout.Width - $versionFallbackText.Length
+        }
+    }
+    $reservedRightWidth = 0
+    if ($versionFallbackLeft -ge 0) {
+        $reservedRightWidth = $versionFallbackText.Length
+    }
+    $commandWidth = [Math]::Max(1, $Layout.Width - $label.Length - $prompt.Length - $reservedRightWidth)
     $cursor = [int]$script:State.CommandCursor
     $offset = 0
     if ($cursor -ge $commandWidth) {
@@ -1956,8 +2000,13 @@ function Add-CommandLineToLines {
         $visibleCommand = $visibleCommand.Substring(0, $commandWidth)
     }
     $text = $label + $prompt + $visibleCommand
-    Add-RenderSegment -Line $line -Left 0 -Text $text -Width $Layout.Width -Foreground $fg -Background $bg
-    $script:RenderState.CommandCursorLeft = [Math]::Min($Layout.Width - 1, $label.Length + $prompt.Length + ($cursor - $offset))
+    Add-RenderSegment -Line $line -Left 0 -Text $text -Width ([Math]::Max(1, $Layout.Width - $reservedRightWidth)) -Foreground $fg -Background $bg
+    if ($versionFallbackLeft -ge 0) {
+        Add-RenderSegment -Line $line -Left $versionFallbackLeft -Text $versionFallbackText -Width $versionFallbackText.Length -Foreground $fg -Background $bg
+    }
+    $cursorRightLimit = $Layout.Width - $reservedRightWidth - 1
+    if ($cursorRightLimit -lt 0) { $cursorRightLimit = 0 }
+    $script:RenderState.CommandCursorLeft = [Math]::Min($cursorRightLimit, $label.Length + $prompt.Length + ($cursor - $offset))
     $script:RenderState.CommandCursorTop = $Layout.CommandLineRow
 }
 
@@ -2881,7 +2930,7 @@ function Normalize-ConsoleKeyInfo {
         if ($code -eq 9) {
             return New-SafeConsoleKeyInfo -KeyChar ([char]9) -Key ([System.ConsoleKey]::Tab) -Shift $shift -Alt $alt -Control $control
         }
-        if ($code -eq 8) {
+        if ($code -eq 8 -or $code -eq 127) {
             return New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Backspace) -Shift $shift -Alt $alt -Control $control
         }
         if ($code -eq 27) {
@@ -2891,6 +2940,9 @@ function Normalize-ConsoleKeyInfo {
 
     if ($code -eq 13 -or $code -eq 10) {
         return New-SafeConsoleKeyInfo -KeyChar ([char]13) -Key ([System.ConsoleKey]::Enter) -Shift $shift -Alt $alt -Control $control
+    }
+    if ($code -eq 8 -or $code -eq 127) {
+        return New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Backspace) -Shift $shift -Alt $alt -Control $control
     }
 
     return $KeyInfo
@@ -2916,7 +2968,7 @@ function Convert-CharacterToConsoleKey {
 
     $code = [int][char]$Character
     if ($code -eq 0) { return [ConsoleKey]::Spacebar }
-    if ($code -eq 8) { return [ConsoleKey]::Backspace }
+    if ($code -eq 8 -or $code -eq 127) { return [ConsoleKey]::Backspace }
     if ($code -eq 9) { return [ConsoleKey]::Tab }
     if ($code -eq 10 -or $code -eq 13) { return [ConsoleKey]::Enter }
     if ($code -eq 27) { return [ConsoleKey]::Escape }
@@ -6838,6 +6890,7 @@ function Get-HelpLines {
         'console_commander help',
         '',
         'Owner:',
+        ('  Version: {0}' -f (Get-AppMetadataValue -Name 'Version')),
         ('  Owner: {0}' -f (Get-AppOwnerName)),
         ('  Email: {0}' -f (Get-AppOwnerEmail)),
         ('  Repository: {0}' -f (Get-AppMetadataValue -Name 'Repository')),
@@ -7364,6 +7417,14 @@ function Invoke-TopMenuAction {
     Request-FullRedraw
 }
 
+function Close-TopPullDownMenuOverlay {
+    if ($null -ne $script:RenderState.DropdownRect) {
+        Restore-ScreenRows -Top $script:RenderState.DropdownRect.Top -Bottom $script:RenderState.DropdownRect.Bottom
+    }
+    $script:RenderState.OpenTopMenuIndex = -1
+    Request-FullRedraw
+}
+
 function Show-TopPullDownMenu {
     param(
         [int]$InitialIndex = 0
@@ -7397,7 +7458,11 @@ function Show-TopPullDownMenu {
         if ($event.Type -eq 'Mouse' -and $event.ButtonDown) {
             $heading = Get-TopMenuHeadingAt -X $event.X -Y $event.Y
             if ($heading -ge 0) {
-                if ($heading -ne $menuIndex -and $null -ne $script:RenderState.DropdownRect) {
+                if ($heading -eq $menuIndex) {
+                    Close-TopPullDownMenuOverlay
+                    return
+                }
+                if ($null -ne $script:RenderState.DropdownRect) {
                     Restore-ScreenRows -Top $script:RenderState.DropdownRect.Top -Bottom $script:RenderState.DropdownRect.Bottom
                 }
                 $menuIndex = $heading
@@ -7408,10 +7473,11 @@ function Show-TopPullDownMenu {
             }
             $itemIndex = Get-DropdownItemAt -X $event.X -Y $event.Y
             if ($itemIndex -ge 0 -and $itemIndex -lt $menus[$menuIndex].Items.Count) {
+                $script:RenderState.OpenTopMenuIndex = -1
                 Invoke-TopMenuAction -Menu $menus[$menuIndex] -Item $menus[$menuIndex].Items[$itemIndex]
                 return
             }
-            Request-FullRedraw
+            Close-TopPullDownMenuOverlay
             return
         }
         if ($event.Type -ne 'Key') {
@@ -8919,17 +8985,43 @@ function Run-SelfTest {
             $wideTopBarText = Convert-RenderLineToPlainText -Line $wideLines[0]
             $narrowLines = Build-AppScreenLines -Width 80 -Height 25
             $narrowTopBarText = Convert-RenderLineToPlainText -Line $narrowLines[0]
+            $versionText = Get-AppVersionText
             $aboutText = [string]::Join("`n", [string[]](Get-AboutLines))
             $helpText = [string]::Join("`n", [string[]](Get-HelpLines))
+            $eightyLineText = [string]::Join("`n", @($narrowLines | ForEach-Object { Convert-RenderLineToPlainText -Line $_ }))
+            $sixtyLines = Build-AppScreenLines -Width 60 -Height 25
+            $sixtyLineText = [string]::Join("`n", @($sixtyLines | ForEach-Object { Convert-RenderLineToPlainText -Line $_ }))
             $ownerMetadataOk = (
                 $wideTopBarText -like '*Owner: Zolnai Zsolt <zzsolt@gmail.com>*' -and
                 $wideTopBarText -like '*Input:*' -and
-                $narrowTopBarText -like '*Zolnai Zsolt*' -and
-                $aboutText -like '*Version: 0.8.0*' -and
+                $wideTopBarText -like ('*{0}*' -f $versionText) -and
+                $narrowTopBarText -like '*Left*' -and
+                $eightyLineText -like ('*{0}*' -f $versionText) -and
+                $sixtyLineText -like ('*{0}*' -f $versionText) -and
+                -not [string]::IsNullOrWhiteSpace((Get-AppMetadataValue -Name 'Version')) -and
+                $aboutText -like ('*Version: {0}*' -f (Get-AppMetadataValue -Name 'Version')) -and
                 $aboutText -like '*Repository: https://github.com/zzsolt/console_commander*' -and
+                $helpText -like ('*Version: {0}*' -f (Get-AppMetadataValue -Name 'Version')) -and
                 $helpText -like '*Email: zzsolt@gmail.com*'
             )
-            if (-not (Test-SelfCondition -Name 'owner metadata topbar about help' -Condition $ownerMetadataOk -Results $results)) { $failed++ }
+            if (-not (Test-SelfCondition -Name 'owner metadata and version topbar about help' -Condition $ownerMetadataOk -Results $results)) { $failed++ }
+
+            $oldOpenTopMenuIndex = $script:RenderState.OpenTopMenuIndex
+            $oldDropdownRect = $script:RenderState.DropdownRect
+            $oldFullRedrawRequired = $script:RenderState.FullRedrawRequired
+            try {
+                $script:RenderState.OpenTopMenuIndex = 0
+                $script:RenderState.DropdownRect = [pscustomobject]@{ Left = 1; Top = 1; Right = 10; Bottom = 3 }
+                $script:RenderState.FullRedrawRequired = $false
+                Close-TopPullDownMenuOverlay
+                $topMenuCloseOk = ($script:RenderState.OpenTopMenuIndex -eq -1 -and [bool]$script:RenderState.FullRedrawRequired)
+                if (-not (Test-SelfCondition -Name 'top menu same heading close state' -Condition $topMenuCloseOk -Results $results)) { $failed++ }
+            }
+            finally {
+                $script:RenderState.OpenTopMenuIndex = $oldOpenTopMenuIndex
+                $script:RenderState.DropdownRect = $oldDropdownRect
+                $script:RenderState.FullRedrawRequired = $oldFullRedrawRequired
+            }
         }
         finally {
             $script:Config.OwnerName = $oldOwnerName
@@ -9108,6 +9200,32 @@ function Run-SelfTest {
             Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]::End))
             $commandEditorOk = ($script:State.CommandLine -eq 'aXd' -and $script:State.CommandCursor -eq 3)
             if (-not (Test-SelfCondition -Name 'command line delete cursor editing' -Condition $commandEditorOk -Results $results)) { $failed++ }
+
+            $script:State.LeftPanel = New-PanelState -Name 'BackspaceCommandLeft' -Path $enterChild
+            Refresh-Panel -Panel $script:State.LeftPanel
+            $script:State.ActivePanel = 'Left'
+            $script:State.CommandLine = 'abc'
+            $script:State.CommandCursor = 3
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Backspace))
+            $backspaceEndOk = ($script:State.CommandLine -eq 'ab' -and $script:State.CommandCursor -eq 2 -and $script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $enterChild))
+            if (-not (Test-SelfCondition -Name 'command line backspace end deletes previous char' -Condition $backspaceEndOk -Results $results)) { $failed++ }
+
+            $script:State.CommandLine = 'abc'
+            $script:State.CommandCursor = 1
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Backspace))
+            $backspaceMiddleOk = ($script:State.CommandLine -eq 'bc' -and $script:State.CommandCursor -eq 0 -and $script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $enterChild))
+            if (-not (Test-SelfCondition -Name 'command line backspace middle deletes previous char' -Condition $backspaceMiddleOk -Results $results)) { $failed++ }
+
+            $script:State.CommandLine = 'abc'
+            $script:State.CommandCursor = 0
+            Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Backspace))
+            $backspaceStartOk = ($script:State.CommandLine -eq 'abc' -and $script:State.CommandCursor -eq 0 -and $script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $enterChild))
+            if (-not (Test-SelfCondition -Name 'command line backspace at start does not navigate' -Condition $backspaceStartOk -Results $results)) { $failed++ }
+
+            $normalizedBackspace8 = Normalize-ConsoleKeyInfo -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]8) -Key ([System.ConsoleKey]::Spacebar))
+            $normalizedBackspace127 = Normalize-ConsoleKeyInfo -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]127) -Key ([System.ConsoleKey]::Spacebar))
+            $backspaceNormalizeOk = ($normalizedBackspace8.Key -eq [System.ConsoleKey]::Backspace -and $normalizedBackspace127.Key -eq [System.ConsoleKey]::Backspace -and [int][char]$normalizedBackspace127.KeyChar -eq 8)
+            if (-not (Test-SelfCondition -Name 'backspace char 8 and 127 normalize' -Condition $backspaceNormalizeOk -Results $results)) { $failed++ }
 
             $script:State.CommandLine = 'long-command-tail'
             $script:State.CommandCursor = $script:State.CommandLine.Length
