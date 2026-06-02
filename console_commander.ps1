@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Continue'
 $script:ApplicationName = 'console_commander'
 $script:AppMetadata = @{
     Name = 'console_commander'
-    Version = '0.8.1'
+    Version = '0.9.0'
     OwnerName = 'Zolnai Zsolt'
     OwnerEmail = 'zzsolt@gmail.com'
     Repository = 'https://github.com/zzsolt/console_commander'
@@ -65,6 +65,17 @@ $script:RenderState = @{
     OpenTopMenuIndex = -1
     VersionVisibleInTopBar = $false
     LastLayout = $null
+}
+$script:ShellViewState = @{
+    Lines = @()
+    CommandLine = ''
+    CommandCursor = 0
+    WorkingDirectory = $null
+    MaxLines = 2000
+    ScrollOffset = 0
+    HasOpened = $false
+    CursorLeft = 0
+    CursorTop = 0
 }
 
 function Get-UsableBasePath {
@@ -496,6 +507,7 @@ function Show-StartupHelp {
         '',
         'Main keys:',
         '  Tab switch panel, Enter open/execute command, Backspace parent',
+        '  Ctrl+O toggles internal shell view',
         '  F1 Help, F2 User menu, F3 View, F4 Edit, F5 Copy, F6 Move',
         '  F7 Mkdir, F8 Delete, F9 PullDn, F10 Quit'
     )
@@ -2100,6 +2112,453 @@ function Paste-CommandLineText {
     Insert-CommandLineText -Text $clipText
 }
 
+function Get-ClipboardTextSafe {
+    $clipText = ''
+    try {
+        if ($null -ne (Get-Command -Name Get-Clipboard -ErrorAction SilentlyContinue)) {
+            $clipText = [string](Get-Clipboard -Raw -ErrorAction Stop)
+        }
+    }
+    catch {
+        $clipText = ''
+    }
+    return $clipText
+}
+
+function Normalize-ShellViewCursor {
+    if ($null -eq $script:ShellViewState.CommandLine) {
+        $script:ShellViewState.CommandLine = ''
+    }
+    if ($null -eq $script:ShellViewState.CommandCursor) {
+        $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+    }
+    if ($script:ShellViewState.CommandCursor -lt 0) {
+        $script:ShellViewState.CommandCursor = 0
+    }
+    if ($script:ShellViewState.CommandCursor -gt $script:ShellViewState.CommandLine.Length) {
+        $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+    }
+}
+
+function Insert-ShellViewText {
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return
+    }
+    Normalize-ShellViewCursor
+    $cleanText = $Text.Replace("`r", '').Replace("`n", ' ')
+    $script:ShellViewState.CommandLine = $script:ShellViewState.CommandLine.Insert([int]$script:ShellViewState.CommandCursor, $cleanText)
+    $script:ShellViewState.CommandCursor += $cleanText.Length
+}
+
+function Remove-ShellViewCharacterBeforeCursor {
+    Normalize-ShellViewCursor
+    if ($script:ShellViewState.CommandCursor -le 0) {
+        return
+    }
+    $script:ShellViewState.CommandLine = $script:ShellViewState.CommandLine.Remove($script:ShellViewState.CommandCursor - 1, 1)
+    $script:ShellViewState.CommandCursor--
+}
+
+function Remove-ShellViewCharacterAtCursor {
+    Normalize-ShellViewCursor
+    if ($script:ShellViewState.CommandCursor -ge $script:ShellViewState.CommandLine.Length) {
+        return
+    }
+    $script:ShellViewState.CommandLine = $script:ShellViewState.CommandLine.Remove($script:ShellViewState.CommandCursor, 1)
+}
+
+function Move-ShellViewCursorLeft {
+    Normalize-ShellViewCursor
+    if ($script:ShellViewState.CommandCursor -gt 0) {
+        $script:ShellViewState.CommandCursor--
+    }
+}
+
+function Move-ShellViewCursorRight {
+    Normalize-ShellViewCursor
+    if ($script:ShellViewState.CommandCursor -lt $script:ShellViewState.CommandLine.Length) {
+        $script:ShellViewState.CommandCursor++
+    }
+}
+
+function Move-ShellViewCursorHome {
+    $script:ShellViewState.CommandCursor = 0
+}
+
+function Move-ShellViewCursorEnd {
+    Normalize-ShellViewCursor
+    $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+}
+
+function Clear-ShellViewCommandLine {
+    $script:ShellViewState.CommandLine = ''
+    $script:ShellViewState.CommandCursor = 0
+}
+
+function Trim-ShellViewBuffer {
+    $maxLines = [int]$script:ShellViewState.MaxLines
+    if ($maxLines -lt 50) {
+        $maxLines = 50
+    }
+    $lines = @($script:ShellViewState.Lines)
+    if ($lines.Count -gt $maxLines) {
+        $script:ShellViewState.Lines = @($lines[($lines.Count - $maxLines)..($lines.Count - 1)])
+    }
+}
+
+function Append-ShellViewLine {
+    param(
+        [string]$Line
+    )
+
+    if ($null -eq $Line) {
+        $Line = ''
+    }
+    $script:ShellViewState.Lines += [string]$Line
+    $script:ShellViewState.ScrollOffset = 0
+    Trim-ShellViewBuffer
+}
+
+function Append-ShellViewText {
+    param(
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return
+    }
+    $parts = [System.Text.RegularExpressions.Regex]::Split([string]$Text, "\r\n|\n|\r")
+    foreach ($part in $parts) {
+        Append-ShellViewLine -Line $part
+    }
+}
+
+function Get-ShellPrompt {
+    $workingDirectory = [string]$script:ShellViewState.WorkingDirectory
+    if ([string]::IsNullOrWhiteSpace($workingDirectory)) {
+        $workingDirectory = (Get-Location).ProviderPath
+    }
+    return ('{0}>' -f $workingDirectory)
+}
+
+function Get-InitialShellViewDirectory {
+    $panel = Get-ActivePanel
+    $candidate = ''
+    if ($null -ne $panel) {
+        $candidate = [string]$panel.Path
+    }
+    if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+        return (Get-NormalizedPath -Path $candidate)
+    }
+    return (Get-Location).ProviderPath
+}
+
+function Resolve-ShellViewPath {
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return [string]$script:ShellViewState.WorkingDirectory
+    }
+    $candidate = $Path.Trim()
+    if ($candidate.Length -ge 2 -and (($candidate.StartsWith('"') -and $candidate.EndsWith('"')) -or ($candidate.StartsWith("'") -and $candidate.EndsWith("'")))) {
+        $candidate = $candidate.Substring(1, $candidate.Length - 2)
+    }
+    if ($candidate -match '(?i)^/d\s+') {
+        $candidate = $candidate.Substring(3).Trim()
+    }
+    if ([System.IO.Path]::IsPathRooted($candidate)) {
+        return (Get-NormalizedPath -Path $candidate)
+    }
+    $basePath = [string]$script:ShellViewState.WorkingDirectory
+    if ([string]::IsNullOrWhiteSpace($basePath)) {
+        $basePath = (Get-Location).ProviderPath
+    }
+    return (Get-NormalizedPath -Path (Join-Path -Path $basePath -ChildPath $candidate))
+}
+
+function Set-ShellViewWorkingDirectory {
+    param(
+        [string]$Path
+    )
+
+    $target = Resolve-ShellViewPath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($target) -or -not (Test-Path -LiteralPath $target -PathType Container)) {
+        Append-ShellViewLine -Line ('cd: path not found: {0}' -f $Path)
+        return $false
+    }
+    $script:ShellViewState.WorkingDirectory = (Get-NormalizedPath -Path $target)
+    return $true
+}
+
+function Enter-ShellView {
+    if ($null -eq $script:ShellViewState.WorkingDirectory -or -not (Test-Path -LiteralPath ([string]$script:ShellViewState.WorkingDirectory) -PathType Container)) {
+        $script:ShellViewState.WorkingDirectory = Get-InitialShellViewDirectory
+    }
+    if (-not [bool]$script:ShellViewState.HasOpened) {
+        Append-ShellViewLine -Line 'console_commander shell view. Press Ctrl+O to return to panels.'
+        $script:ShellViewState.HasOpened = $true
+    }
+    $script:State['ShellViewVisible'] = $true
+    $script:RenderState.OpenTopMenuIndex = -1
+    $script:RenderState.DropdownRect = $null
+    $script:LastMouseClick = $null
+    Clear-ScreenSafe
+    Set-ConsoleColorsSafe -Foreground ([ConsoleColor]::Gray) -Background ([ConsoleColor]::Black)
+    Request-FullRedraw
+}
+
+function Exit-ShellView {
+    $script:State['ShellViewVisible'] = $false
+    $workingDirectory = [string]$script:ShellViewState.WorkingDirectory
+    if (-not [string]::IsNullOrWhiteSpace($workingDirectory) -and (Test-Path -LiteralPath $workingDirectory -PathType Container)) {
+        $panel = Get-ActivePanel
+        if ($null -ne $panel -and -not [string]::Equals((Get-NormalizedPath -Path ([string]$panel.Path)), (Get-NormalizedPath -Path $workingDirectory), [System.StringComparison]::OrdinalIgnoreCase)) {
+            [void](Set-PanelLocalPath -Panel $panel -Path $workingDirectory)
+        }
+    }
+    Clear-ScreenSafe
+    Request-FullRedraw
+}
+
+function Invoke-ShellViewExternalCommand {
+    param(
+        [string]$CommandLine
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return
+    }
+    if ($CommandLine -match '(?i)^\s*(powershell(\.exe)?|pwsh(\.exe)?|cmd(\.exe)?)\s*$' -or $CommandLine -match '(?i)\s-NoExit(\s|$)') {
+        Append-ShellViewLine -Line 'Command refused.'
+        Append-ShellViewLine -Line 'Interactive shells are not run inside shell view.'
+        return
+    }
+
+    try {
+        $timeoutSeconds = [int]$script:Config.CommandTimeoutSeconds
+        if ($timeoutSeconds -lt 1) {
+            $timeoutSeconds = 60
+        }
+        $workingDirectory = [string]$script:ShellViewState.WorkingDirectory
+        if ([string]::IsNullOrWhiteSpace($workingDirectory) -or -not (Test-Path -LiteralPath $workingDirectory -PathType Container)) {
+            $workingDirectory = Get-InitialShellViewDirectory
+            $script:ShellViewState.WorkingDirectory = $workingDirectory
+        }
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = (Get-UsableBasePath -Preferred $env:ComSpec -Fallback 'cmd.exe')
+        $psi.Arguments = '/d /c ' + $CommandLine
+        $psi.WorkingDirectory = $workingDirectory
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+        [void]$process.Start()
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $finished = $process.WaitForExit($timeoutSeconds * 1000)
+        if (-not $finished) {
+            Stop-ProcessTreeSafe -ProcessId $process.Id
+            Append-ShellViewLine -Line ('Command timed out after {0} seconds.' -f $timeoutSeconds)
+            return
+        }
+        $outputTask.Wait()
+        $errorTask.Wait()
+        if (-not [string]::IsNullOrEmpty($outputTask.Result)) {
+            Append-ShellViewText -Text $outputTask.Result.TrimEnd()
+        }
+        if (-not [string]::IsNullOrEmpty($errorTask.Result)) {
+            Append-ShellViewText -Text $errorTask.Result.TrimEnd()
+        }
+        if ([int]$process.ExitCode -ne 0) {
+            Append-ShellViewLine -Line ('Exit code: {0}' -f $process.ExitCode)
+        }
+    }
+    catch {
+        Write-AppLog -Level 'ERROR' -Message ('Shell view command failed {0}: {1}' -f $CommandLine, $_.Exception.Message)
+        Append-ShellViewLine -Line ('Command failed: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Invoke-ShellViewCommand {
+    Normalize-ShellViewCursor
+    $command = [string]$script:ShellViewState.CommandLine
+    Append-ShellViewLine -Line ((Get-ShellPrompt) + $command)
+    Clear-ShellViewCommandLine
+    $trimmed = $command.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return
+    }
+    if ($trimmed -match '(?i)^(cls|clear)$') {
+        $script:ShellViewState.Lines = @()
+        $script:ShellViewState.ScrollOffset = 0
+        return
+    }
+    if ($trimmed -match '(?i)^exit$') {
+        Exit-ShellView
+        return
+    }
+    if ($trimmed -match '(?i)^cd(\s+(.+))?$') {
+        $target = ''
+        if ($matches.Count -gt 2) {
+            $target = [string]$matches[2]
+        }
+        if ([string]::IsNullOrWhiteSpace($target)) {
+            Append-ShellViewLine -Line ([string]$script:ShellViewState.WorkingDirectory)
+        }
+        else {
+            [void](Set-ShellViewWorkingDirectory -Path $target)
+        }
+        return
+    }
+    Invoke-ShellViewExternalCommand -CommandLine $command
+}
+
+function Build-ShellViewLines {
+    param(
+        [int]$Width,
+        [int]$Height
+    )
+
+    $lines = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $Height; $i++) {
+        $line = New-RenderLine -Width $Width
+        Add-RenderSegment -Line $line -Left 0 -Text '' -Width $Width -Foreground ([ConsoleColor]::Gray) -Background ([ConsoleColor]::Black)
+        [void]$lines.Add($line)
+    }
+
+    $prompt = Get-ShellPrompt
+    Normalize-ShellViewCursor
+    $commandWidth = [Math]::Max(1, $Width - $prompt.Length)
+    $cursor = [int]$script:ShellViewState.CommandCursor
+    $offset = 0
+    if ($cursor -ge $commandWidth) {
+        $offset = $cursor - $commandWidth + 1
+    }
+    if ($offset -gt $script:ShellViewState.CommandLine.Length) {
+        $offset = $script:ShellViewState.CommandLine.Length
+    }
+    $visibleCommand = ''
+    if ($offset -lt $script:ShellViewState.CommandLine.Length) {
+        $visibleCommand = $script:ShellViewState.CommandLine.Substring($offset)
+    }
+    if ($visibleCommand.Length -gt $commandWidth) {
+        $visibleCommand = $visibleCommand.Substring(0, $commandWidth)
+    }
+
+    $viewHeight = [Math]::Max(0, $Height - 1)
+    $buffer = @($script:ShellViewState.Lines)
+    $scrollOffset = [Math]::Max(0, [int]$script:ShellViewState.ScrollOffset)
+    $maxOffset = [Math]::Max(0, $buffer.Count - $viewHeight)
+    if ($scrollOffset -gt $maxOffset) {
+        $scrollOffset = $maxOffset
+        $script:ShellViewState.ScrollOffset = $scrollOffset
+    }
+    $endExclusive = $buffer.Count - $scrollOffset
+    if ($endExclusive -lt 0) { $endExclusive = 0 }
+    $start = [Math]::Max(0, $endExclusive - $viewHeight)
+    $row = 0
+    for ($i = $start; $i -lt $endExclusive -and $row -lt $viewHeight; $i++) {
+        Add-RenderSegment -Line $lines[$row] -Left 0 -Text ([string]$buffer[$i]) -Width $Width -Foreground ([ConsoleColor]::Gray) -Background ([ConsoleColor]::Black)
+        $row++
+    }
+
+    $commandRow = [Math]::Max(0, $Height - 1)
+    Add-RenderSegment -Line $lines[$commandRow] -Left 0 -Text ($prompt + $visibleCommand) -Width $Width -Foreground ([ConsoleColor]::Gray) -Background ([ConsoleColor]::Black)
+    $script:ShellViewState.CursorTop = $commandRow
+    $script:ShellViewState.CursorLeft = [Math]::Min([Math]::Max(0, $Width - 1), $prompt.Length + ($cursor - $offset))
+    return $lines
+}
+
+function Render-ShellView {
+    $size = Get-ConsoleSizeSafe
+    $width = $size.Width
+    $height = $size.Height
+    $lines = Build-ShellViewLines -Width $width -Height $height
+    Render-LineCache -Lines $lines -Width $width -Height $height
+    try {
+        [Console]::CursorVisible = $true
+        [Console]::SetCursorPosition([int]$script:ShellViewState.CursorLeft, [int]$script:ShellViewState.CursorTop)
+    }
+    catch {
+    }
+}
+
+function Handle-ShellViewMouseEvent {
+    param(
+        [object]$MouseEvent
+    )
+
+    if ($null -eq $MouseEvent) {
+        return
+    }
+    if ($MouseEvent.WheelDelta -ne 0) {
+        $size = Get-ConsoleSizeSafe
+        $page = [Math]::Max(1, $size.Height - 2)
+        if ($MouseEvent.WheelDelta -gt 0) {
+            $script:ShellViewState.ScrollOffset += 3
+        }
+        else {
+            $script:ShellViewState.ScrollOffset = [Math]::Max(0, [int]$script:ShellViewState.ScrollOffset - 3)
+        }
+        $maxOffset = [Math]::Max(0, @($script:ShellViewState.Lines).Count - $page)
+        if ($script:ShellViewState.ScrollOffset -gt $maxOffset) {
+            $script:ShellViewState.ScrollOffset = $maxOffset
+        }
+    }
+}
+
+function Handle-ShellViewKey {
+    param(
+        [ConsoleKeyInfo]$KeyInfo
+    )
+
+    $KeyInfo = Normalize-ConsoleKeyInfo -KeyInfo $KeyInfo
+    $control = (($KeyInfo.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+    if ($control -and $KeyInfo.Key -eq [ConsoleKey]::O) {
+        Exit-ShellView
+        return
+    }
+    if ($control -and $KeyInfo.Key -eq [ConsoleKey]::V) {
+        Insert-ShellViewText -Text (Get-ClipboardTextSafe)
+        return
+    }
+
+    switch ($KeyInfo.Key) {
+        ([ConsoleKey]::LeftArrow) { Move-ShellViewCursorLeft; return }
+        ([ConsoleKey]::RightArrow) { Move-ShellViewCursorRight; return }
+        ([ConsoleKey]::Home) { Move-ShellViewCursorHome; return }
+        ([ConsoleKey]::End) { Move-ShellViewCursorEnd; return }
+        ([ConsoleKey]::Backspace) { Remove-ShellViewCharacterBeforeCursor; return }
+        ([ConsoleKey]::Delete) { Remove-ShellViewCharacterAtCursor; return }
+        ([ConsoleKey]::Escape) { Clear-ShellViewCommandLine; return }
+        ([ConsoleKey]::Enter) { Invoke-ShellViewCommand; return }
+        ([ConsoleKey]::PageUp) {
+            $size = Get-ConsoleSizeSafe
+            $script:ShellViewState.ScrollOffset += [Math]::Max(1, $size.Height - 2)
+            return
+        }
+        ([ConsoleKey]::PageDown) {
+            $size = Get-ConsoleSizeSafe
+            $script:ShellViewState.ScrollOffset = [Math]::Max(0, [int]$script:ShellViewState.ScrollOffset - [Math]::Max(1, $size.Height - 2))
+            return
+        }
+        default {
+            if (-not [char]::IsControl($KeyInfo.KeyChar)) {
+                Insert-ShellViewText -Text ([string]$KeyInfo.KeyChar)
+            }
+        }
+    }
+}
+
 function Add-FunctionKeyBarToLines {
     param(
         [System.Collections.ArrayList]$Lines,
@@ -2923,6 +3382,10 @@ function Normalize-ConsoleKeyInfo {
     $code = [int][char]$char
     $keyValue = [int]$key
 
+    if ($code -eq 15) {
+        return New-SafeConsoleKeyInfo -KeyChar ([char]15) -Key ([System.ConsoleKey]::O) -Shift $shift -Alt $alt -Control $true
+    }
+
     if ($key -eq [System.ConsoleKey]::NoName -or $keyValue -eq 0) {
         if ($code -eq 13 -or $code -eq 10) {
             return New-SafeConsoleKeyInfo -KeyChar ([char]13) -Key ([System.ConsoleKey]::Enter) -Shift $shift -Alt $alt -Control $control
@@ -2968,6 +3431,7 @@ function Convert-CharacterToConsoleKey {
 
     $code = [int][char]$Character
     if ($code -eq 0) { return [ConsoleKey]::Spacebar }
+    if ($code -eq 15) { return [ConsoleKey]::O }
     if ($code -eq 8 -or $code -eq 127) { return [ConsoleKey]::Backspace }
     if ($code -eq 9) { return [ConsoleKey]::Tab }
     if ($code -eq 10 -or $code -eq 13) { return [ConsoleKey]::Enter }
@@ -6900,6 +7364,7 @@ function Get-HelpLines {
         '  Up/Down move selection, PageUp/PageDown page, Home/End first/last',
         '  Enter opens directory, views file, or executes typed command',
         '  Backspace goes to parent directory',
+        '  Ctrl+O toggles internal shell view without launching an external interactive shell',
         '  Alt+Left/Right moves through active panel history',
         '  Ctrl+R rereads active panel, Ctrl+L repaints screen',
         '',
@@ -6918,6 +7383,7 @@ function Get-HelpLines {
         '  Options also exposes mouse diagnostics and an event monitor toggle.',
         '  Input status shows KB+Mouse Win32, KB+Mouse VT, or Keyboard-only fallback reason.',
         '  Use -MouseDiagnostics for a console-only keyboard and mouse event test loop.',
+        '  Shell view keeps keyboard active, ignores hidden panel clicks, and returns with Ctrl+O.',
         '',
         'Visual style:',
         '  Options can select ASCII or Unicode borders, compact mode, and color theme.',
@@ -8357,6 +8823,7 @@ function Handle-Key {
         [ConsoleKeyInfo]$KeyInfo
     )
 
+    $KeyInfo = Normalize-ConsoleKeyInfo -KeyInfo $KeyInfo
     $panel = Get-ActivePanel
     $control = (($KeyInfo.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
     $alt = (($KeyInfo.Modifiers -band [ConsoleModifiers]::Alt) -ne 0)
@@ -8368,6 +8835,10 @@ function Handle-Key {
     if ($control -and $KeyInfo.Key -eq [ConsoleKey]::L) {
         Request-FullRedraw
         Render-App
+        return
+    }
+    if ($control -and $KeyInfo.Key -eq [ConsoleKey]::O) {
+        Enter-ShellView
         return
     }
     if ($control -and $KeyInfo.Key -eq [ConsoleKey]::F) {
@@ -8509,6 +8980,7 @@ function Initialize-State {
         ActivePanel = 'Left'
         CommandLine = ''
         CommandCursor = 0
+        ShellViewVisible = $false
         ExitRequested = $false
         VisibleRows = 10
     }
@@ -8532,17 +9004,35 @@ function Start-InteractiveApp {
         while (-not $script:State.ExitRequested) {
             $size = Get-ConsoleSizeSafe
             $script:State.VisibleRows = [Math]::Max(1, $size.Height - 8)
-            Render-App
+            if ([bool]$script:State.ShellViewVisible) {
+                Render-ShellView
+            }
+            else {
+                Render-App
+            }
             try {
                 $inputEvent = Read-InputEvent
-                if ($inputEvent.Type -eq 'Key') {
-                    Handle-Key -KeyInfo $inputEvent.KeyInfo
+                if ([bool]$script:State.ShellViewVisible) {
+                    if ($inputEvent.Type -eq 'Key') {
+                        Handle-ShellViewKey -KeyInfo $inputEvent.KeyInfo
+                    }
+                    elseif ($inputEvent.Type -eq 'Mouse') {
+                        Handle-ShellViewMouseEvent -MouseEvent $inputEvent
+                    }
+                    elseif ($inputEvent.Type -eq 'Resize') {
+                        Request-FullRedraw
+                    }
                 }
-                elseif ($inputEvent.Type -eq 'Mouse') {
-                    Handle-MouseEvent -MouseEvent $inputEvent
-                }
-                elseif ($inputEvent.Type -eq 'Resize') {
-                    Request-FullRedraw
+                else {
+                    if ($inputEvent.Type -eq 'Key') {
+                        Handle-Key -KeyInfo $inputEvent.KeyInfo
+                    }
+                    elseif ($inputEvent.Type -eq 'Mouse') {
+                        Handle-MouseEvent -MouseEvent $inputEvent
+                    }
+                    elseif ($inputEvent.Type -eq 'Resize') {
+                        Request-FullRedraw
+                    }
                 }
             }
             catch {
@@ -8738,6 +9228,16 @@ function Invoke-InputParserSelfTestCases {
         $altFunctionOk = $false
     }
     if (-not (Test-SelfCondition -Name 'vt key alt f1 f2 modifiers' -Condition $altFunctionOk -Results $Results)) { $failed++ }
+
+    $ctrlOCharOk = $false
+    try {
+        $ctrlOInfo = Normalize-ConsoleKeyInfo -KeyInfo (New-ConsoleKeyInfoFromCharacter -Character ([char]15))
+        $ctrlOCharOk = ($ctrlOInfo.Key -eq [ConsoleKey]::O -and (($ctrlOInfo.Modifiers -band [ConsoleModifiers]::Control) -ne 0))
+    }
+    catch {
+        $ctrlOCharOk = $false
+    }
+    if (-not (Test-SelfCondition -Name 'ctrl o control char normalizes' -Condition $ctrlOCharOk -Results $Results)) { $failed++ }
 
     return $failed
 }
@@ -9226,6 +9726,113 @@ function Run-SelfTest {
             $normalizedBackspace127 = Normalize-ConsoleKeyInfo -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]127) -Key ([System.ConsoleKey]::Spacebar))
             $backspaceNormalizeOk = ($normalizedBackspace8.Key -eq [System.ConsoleKey]::Backspace -and $normalizedBackspace127.Key -eq [System.ConsoleKey]::Backspace -and [int][char]$normalizedBackspace127.KeyChar -eq 8)
             if (-not (Test-SelfCondition -Name 'backspace char 8 and 127 normalize' -Condition $backspaceNormalizeOk -Results $results)) { $failed++ }
+
+            $normalizedCtrlOKey = Normalize-ConsoleKeyInfo -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]'o') -Key ([System.ConsoleKey]::O) -Control $true)
+            $normalizedCtrlOChar = Normalize-ConsoleKeyInfo -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]15) -Key ([System.ConsoleKey]::NoName))
+            $ctrlONormalizeOk = (
+                $normalizedCtrlOKey.Key -eq [ConsoleKey]::O -and
+                (($normalizedCtrlOKey.Modifiers -band [ConsoleModifiers]::Control) -ne 0) -and
+                $normalizedCtrlOChar.Key -eq [ConsoleKey]::O -and
+                (($normalizedCtrlOChar.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+            )
+            if (-not (Test-SelfCondition -Name 'ctrl o key and char normalize' -Condition $ctrlONormalizeOk -Results $results)) { $failed++ }
+
+            $oldShellViewState = @{
+                Lines = @($script:ShellViewState.Lines)
+                CommandLine = [string]$script:ShellViewState.CommandLine
+                CommandCursor = [int]$script:ShellViewState.CommandCursor
+                WorkingDirectory = $script:ShellViewState.WorkingDirectory
+                MaxLines = [int]$script:ShellViewState.MaxLines
+                ScrollOffset = [int]$script:ShellViewState.ScrollOffset
+                HasOpened = [bool]$script:ShellViewState.HasOpened
+                CursorLeft = [int]$script:ShellViewState.CursorLeft
+                CursorTop = [int]$script:ShellViewState.CursorTop
+            }
+            $oldShellVisible = [bool]$script:State.ShellViewVisible
+            $oldFullRedraw = [bool]$script:RenderState.FullRedrawRequired
+            $oldMouseClick = $script:LastMouseClick
+            try {
+                $shellPanelChild = Join-Path -Path $leftRoot -ChildPath 'shell_child'
+                New-DirectoryIfMissing -Path $shellPanelChild
+                $script:State.LeftPanel = New-PanelState -Name 'ShellLeft' -Path $shellPanelChild
+                $script:State.RightPanel = New-PanelState -Name 'ShellRight' -Path $rightRoot
+                $script:State.ActivePanel = 'Left'
+                $script:State.LeftPanel.SelectedIndex = 1
+                $selectionBeforeShell = $script:State.LeftPanel.SelectedIndex
+                $script:State['ShellViewVisible'] = $false
+                $script:ShellViewState.Lines = @()
+                $script:ShellViewState.CommandLine = ''
+                $script:ShellViewState.CommandCursor = 0
+                $script:ShellViewState.WorkingDirectory = $null
+                $script:ShellViewState.ScrollOffset = 0
+                $script:ShellViewState.HasOpened = $false
+
+                Handle-Key -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]15) -Key ([ConsoleKey]::NoName))
+                $enterShellOk = (
+                    [bool]$script:State.ShellViewVisible -and
+                    $script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $shellPanelChild) -and
+                    $script:State.LeftPanel.SelectedIndex -eq $selectionBeforeShell -and
+                    [string]$script:ShellViewState.WorkingDirectory -eq (Get-NormalizedPath -Path $shellPanelChild)
+                )
+                if (-not (Test-SelfCondition -Name 'ctrl o enters shell view preserving panel state' -Condition $enterShellOk -Results $results)) { $failed++ }
+
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]'a') -Key ([ConsoleKey]::A))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]'b') -Key ([ConsoleKey]::B))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]'c') -Key ([ConsoleKey]::C))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([ConsoleKey]::LeftArrow))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([ConsoleKey]::Backspace))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([ConsoleKey]::Delete))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([ConsoleKey]::End))
+                Handle-ShellViewKey -KeyInfo (New-SafeConsoleKeyInfo -KeyChar ([char]'d') -Key ([ConsoleKey]::D))
+                $shellEditorOk = ($script:ShellViewState.CommandLine -eq 'ad' -and $script:ShellViewState.CommandCursor -eq 2)
+                if (-not (Test-SelfCondition -Name 'shell view command editor' -Condition $shellEditorOk -Results $results)) { $failed++ }
+
+                $script:ShellViewState.CommandLine = 'echo shell_view_ok'
+                $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+                Invoke-ShellViewCommand
+                $shellOutputText = [string]::Join("`n", [string[]]@($script:ShellViewState.Lines))
+                if (-not (Test-SelfCondition -Name 'shell view command output' -Condition ($shellOutputText -like '*shell_view_ok*') -Results $results)) { $failed++ }
+
+                $script:ShellViewState.CommandLine = 'cls'
+                $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+                Invoke-ShellViewCommand
+                $shellClsOk = (@($script:ShellViewState.Lines).Count -eq 0)
+                if (-not (Test-SelfCondition -Name 'shell view cls clears buffer' -Condition $shellClsOk -Results $results)) { $failed++ }
+
+                $script:ShellViewState.WorkingDirectory = (Get-NormalizedPath -Path $shellPanelChild)
+                $script:ShellViewState.CommandLine = 'cd ..'
+                $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+                Invoke-ShellViewCommand
+                $shellCdOk = ([string]$script:ShellViewState.WorkingDirectory -eq (Get-NormalizedPath -Path $leftRoot))
+                if (-not (Test-SelfCondition -Name 'shell view cd parent changes working directory' -Condition $shellCdOk -Results $results)) { $failed++ }
+
+                $mouseBeforePath = [string]$script:State.LeftPanel.Path
+                $shellMouseEvent = New-InputMouseEvent -X 2 -Y 4 -ButtonDown $true -Click $true
+                Handle-ShellViewMouseEvent -MouseEvent $shellMouseEvent
+                $shellHiddenMouseOk = ([string]$script:State.LeftPanel.Path -eq $mouseBeforePath -and [bool]$script:State.ShellViewVisible)
+                if (-not (Test-SelfCondition -Name 'shell view ignores hidden panel mouse click' -Condition $shellHiddenMouseOk -Results $results)) { $failed++ }
+
+                $script:ShellViewState.CommandLine = 'exit'
+                $script:ShellViewState.CommandCursor = $script:ShellViewState.CommandLine.Length
+                $script:RenderState.FullRedrawRequired = $false
+                Invoke-ShellViewCommand
+                $shellExitOk = (-not [bool]$script:State.ShellViewVisible -and [bool]$script:RenderState.FullRedrawRequired -and [string]$script:State.LeftPanel.Path -eq (Get-NormalizedPath -Path $leftRoot))
+                if (-not (Test-SelfCondition -Name 'shell view exit restores tui and syncs active panel' -Condition $shellExitOk -Results $results)) { $failed++ }
+            }
+            finally {
+                $script:ShellViewState.Lines = @($oldShellViewState.Lines)
+                $script:ShellViewState.CommandLine = [string]$oldShellViewState.CommandLine
+                $script:ShellViewState.CommandCursor = [int]$oldShellViewState.CommandCursor
+                $script:ShellViewState.WorkingDirectory = $oldShellViewState.WorkingDirectory
+                $script:ShellViewState.MaxLines = [int]$oldShellViewState.MaxLines
+                $script:ShellViewState.ScrollOffset = [int]$oldShellViewState.ScrollOffset
+                $script:ShellViewState.HasOpened = [bool]$oldShellViewState.HasOpened
+                $script:ShellViewState.CursorLeft = [int]$oldShellViewState.CursorLeft
+                $script:ShellViewState.CursorTop = [int]$oldShellViewState.CursorTop
+                $script:State['ShellViewVisible'] = $oldShellVisible
+                $script:RenderState.FullRedrawRequired = $oldFullRedraw
+                $script:LastMouseClick = $oldMouseClick
+            }
 
             $script:State.CommandLine = 'long-command-tail'
             $script:State.CommandCursor = $script:State.CommandLine.Length
