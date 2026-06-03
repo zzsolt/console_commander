@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Continue'
 $script:ApplicationName = 'console_commander'
 $script:AppMetadata = @{
     Name = 'console_commander'
-    Version = '0.9.0'
+    Version = '0.10.1'
     OwnerName = 'Zolnai Zsolt'
     OwnerEmail = 'zzsolt@gmail.com'
     Repository = 'https://github.com/zzsolt/console_commander'
@@ -57,6 +57,8 @@ $script:RenderState = @{
     LineCache = @{}
     TopMenuZones = @()
     FunctionKeyZones = @()
+    ShortcutBarRedrawRequired = $false
+    ShortcutBarLayer = 'Normal'
     LeftPanelZone = $null
     RightPanelZone = $null
     DialogButtonZones = @()
@@ -76,6 +78,26 @@ $script:ShellViewState = @{
     HasOpened = $false
     CursorLeft = 0
     CursorTop = 0
+}
+$script:ShortcutRegistry = @()
+$script:ShortcutActionSet = @(
+    'Help', 'UserMenu', 'View', 'Edit', 'Copy', 'Move', 'Mkdir', 'Delete', 'MainMenu', 'Quit',
+    'RefreshPanel', 'FullRepaint', 'ToggleShellView', 'QuickSearch', 'MoveUp', 'MoveDown',
+    'CommandHome', 'PasteCommand', 'LeftDriveChooser', 'RightDriveChooser',
+    'PanelHistoryBack', 'PanelHistoryForward', 'OpenLeftMenu', 'OpenFileMenu',
+    'OpenCommandMenu', 'OpenOptionsMenu', 'OpenRightMenu', 'Noop'
+)
+$script:InputModifierState = @{
+    CtrlDown = $false
+    AltDown = $false
+    ShiftDown = $false
+    ActiveShortcutLayer = 'Normal'
+    LastLayer = 'Normal'
+    Source = 'None'
+    LastChangeUtc = [DateTime]::UtcNow
+    AsyncKeyStateAvailable = $false
+    AsyncKeyStateChecked = $false
+    LastPollUtc = [DateTime]::MinValue
 }
 
 function Get-UsableBasePath {
@@ -1183,6 +1205,355 @@ function Clear-ScreenSafe {
 
 function Request-FullRedraw {
     $script:RenderState.FullRedrawRequired = $true
+}
+
+function Request-ShortcutBarRedraw {
+    $script:RenderState.ShortcutBarRedrawRequired = $true
+}
+
+function New-ShortcutRegistryEntry {
+    param(
+        [string]$Context,
+        [string]$Layer,
+        [int]$Slot,
+        [string]$KeyText,
+        [System.ConsoleKey]$Key,
+        [string[]]$Modifiers,
+        [string]$ShortLabel,
+        [string]$Action,
+        [bool]$ShowInBar = $true
+    )
+
+    return [pscustomobject]@{
+        Context = $Context
+        Layer = $Layer
+        Slot = $Slot
+        KeyText = $KeyText
+        Key = $Key
+        Modifiers = @($Modifiers)
+        ShortLabel = $ShortLabel
+        Action = $Action
+        ShowInBar = $ShowInBar
+    }
+}
+
+function Initialize-ShortcutRegistry {
+    $items = @()
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 1 -KeyText 'F1' -Key ([ConsoleKey]::F1) -Modifiers @() -ShortLabel 'Help' -Action 'Help'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 2 -KeyText 'F2' -Key ([ConsoleKey]::F2) -Modifiers @() -ShortLabel 'User' -Action 'UserMenu'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 3 -KeyText 'F3' -Key ([ConsoleKey]::F3) -Modifiers @() -ShortLabel 'View' -Action 'View'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 4 -KeyText 'F4' -Key ([ConsoleKey]::F4) -Modifiers @() -ShortLabel 'Edit' -Action 'Edit'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 5 -KeyText 'F5' -Key ([ConsoleKey]::F5) -Modifiers @() -ShortLabel 'Copy' -Action 'Copy'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 6 -KeyText 'F6' -Key ([ConsoleKey]::F6) -Modifiers @() -ShortLabel 'Move' -Action 'Move'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 7 -KeyText 'F7' -Key ([ConsoleKey]::F7) -Modifiers @() -ShortLabel 'Mkdir' -Action 'Mkdir'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 8 -KeyText 'F8' -Key ([ConsoleKey]::F8) -Modifiers @() -ShortLabel 'Delete' -Action 'Delete'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 9 -KeyText 'F9' -Key ([ConsoleKey]::F9) -Modifiers @() -ShortLabel 'Menu' -Action 'MainMenu'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Normal' -Slot 10 -KeyText 'F10' -Key ([ConsoleKey]::F10) -Modifiers @() -ShortLabel 'Quit' -Action 'Quit'
+
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 1 -KeyText 'C-R' -Key ([ConsoleKey]::R) -Modifiers @('Control') -ShortLabel 'Reread' -Action 'RefreshPanel'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 2 -KeyText 'C-L' -Key ([ConsoleKey]::L) -Modifiers @('Control') -ShortLabel 'Repaint' -Action 'FullRepaint'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 3 -KeyText 'C-O' -Key ([ConsoleKey]::O) -Modifiers @('Control') -ShortLabel 'Shell' -Action 'ToggleShellView'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 4 -KeyText 'C-F' -Key ([ConsoleKey]::F) -Modifiers @('Control') -ShortLabel 'Find' -Action 'QuickSearch'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 5 -KeyText 'C-P' -Key ([ConsoleKey]::P) -Modifiers @('Control') -ShortLabel 'Up' -Action 'MoveUp'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 6 -KeyText 'C-N' -Key ([ConsoleKey]::N) -Modifiers @('Control') -ShortLabel 'Down' -Action 'MoveDown'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 7 -KeyText 'C-A' -Key ([ConsoleKey]::A) -Modifiers @('Control') -ShortLabel 'Home' -Action 'CommandHome'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 8 -KeyText 'C-V' -Key ([ConsoleKey]::V) -Modifiers @('Control') -ShortLabel 'Paste' -Action 'PasteCommand'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 9 -KeyText '--' -Key ([ConsoleKey]::NoName) -Modifiers @('Control') -ShortLabel '' -Action 'Noop' -ShowInBar $false
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Ctrl' -Slot 10 -KeyText '--' -Key ([ConsoleKey]::NoName) -Modifiers @('Control') -ShortLabel '' -Action 'Noop' -ShowInBar $false
+
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 1 -KeyText 'A-F1' -Key ([ConsoleKey]::F1) -Modifiers @('Alt') -ShortLabel 'LDrive' -Action 'LeftDriveChooser'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 2 -KeyText 'A-F2' -Key ([ConsoleKey]::F2) -Modifiers @('Alt') -ShortLabel 'RDrive' -Action 'RightDriveChooser'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 3 -KeyText 'A-S' -Key ([ConsoleKey]::S) -Modifiers @('Alt') -ShortLabel 'Search' -Action 'QuickSearch'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 4 -KeyText 'A-Left' -Key ([ConsoleKey]::LeftArrow) -Modifiers @('Alt') -ShortLabel 'Back' -Action 'PanelHistoryBack'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 5 -KeyText 'A-Right' -Key ([ConsoleKey]::RightArrow) -Modifiers @('Alt') -ShortLabel 'Fwd' -Action 'PanelHistoryForward'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 6 -KeyText 'A-L' -Key ([ConsoleKey]::L) -Modifiers @('Alt') -ShortLabel 'Left' -Action 'OpenLeftMenu'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 7 -KeyText 'A-F' -Key ([ConsoleKey]::F) -Modifiers @('Alt') -ShortLabel 'File' -Action 'OpenFileMenu'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 8 -KeyText 'A-C' -Key ([ConsoleKey]::C) -Modifiers @('Alt') -ShortLabel 'Cmd' -Action 'OpenCommandMenu'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 9 -KeyText 'A-O' -Key ([ConsoleKey]::O) -Modifiers @('Alt') -ShortLabel 'Opt' -Action 'OpenOptionsMenu'
+    $items += New-ShortcutRegistryEntry -Context 'Main' -Layer 'Alt' -Slot 10 -KeyText 'A-R' -Key ([ConsoleKey]::R) -Modifiers @('Alt') -ShortLabel 'Right' -Action 'OpenRightMenu'
+
+    $script:ShortcutRegistry = @($items)
+}
+
+function Get-ShortcutBarLayer {
+    param(
+        [string]$PreferredLayer = ''
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($PreferredLayer)) {
+        return $PreferredLayer
+    }
+    return (Get-ActiveShortcutLayer)
+}
+
+function Get-ShortcutBarItems {
+    param(
+        [string]$Context = 'Main',
+        [string]$Layer = ''
+    )
+
+    if ($null -eq $script:ShortcutRegistry -or @($script:ShortcutRegistry).Count -eq 0) {
+        Initialize-ShortcutRegistry
+    }
+    $effectiveLayer = Get-ShortcutBarLayer -PreferredLayer $Layer
+    $result = @()
+    for ($slot = 1; $slot -le 10; $slot++) {
+        $entry = @($script:ShortcutRegistry | Where-Object { $_.Context -eq $Context -and $_.Layer -eq $effectiveLayer -and [int]$_.Slot -eq $slot } | Select-Object -First 1)
+        if ($entry.Count -gt 0) {
+            $result += $entry[0]
+        }
+        else {
+            $result += New-ShortcutRegistryEntry -Context $Context -Layer $effectiveLayer -Slot $slot -KeyText '--' -Key ([ConsoleKey]::NoName) -Modifiers @() -ShortLabel '' -Action 'Noop' -ShowInBar $false
+        }
+    }
+    return @($result)
+}
+
+function Format-ShortcutBarSegment {
+    param(
+        [object]$Item
+    )
+
+    if ($null -eq $Item) {
+        return '--'
+    }
+    if (-not [bool]$Item.ShowInBar -or [string]::IsNullOrWhiteSpace([string]$Item.ShortLabel)) {
+        return [string]$Item.KeyText
+    }
+    return ('{0}:{1}' -f [string]$Item.KeyText, [string]$Item.ShortLabel)
+}
+
+function Get-ShortcutModifierNamesFromConsoleModifiers {
+    param(
+        [System.ConsoleModifiers]$Modifiers
+    )
+
+    $names = @()
+    if (($Modifiers -band [ConsoleModifiers]::Control) -ne 0) { $names += 'Control' }
+    if (($Modifiers -band [ConsoleModifiers]::Alt) -ne 0) { $names += 'Alt' }
+    if (($Modifiers -band [ConsoleModifiers]::Shift) -ne 0) { $names += 'Shift' }
+    return @($names)
+}
+
+function Test-ShortcutModifiersEqual {
+    param(
+        [string[]]$Left,
+        [string[]]$Right
+    )
+
+    $leftKey = [string]::Join('|', @($Left | Sort-Object))
+    $rightKey = [string]::Join('|', @($Right | Sort-Object))
+    return ($leftKey -eq $rightKey)
+}
+
+function Find-ShortcutActionByKey {
+    param(
+        [System.ConsoleKey]$Key,
+        [System.ConsoleModifiers]$Modifiers,
+        [string]$Context = 'Main'
+    )
+
+    if ($null -eq $script:ShortcutRegistry -or @($script:ShortcutRegistry).Count -eq 0) {
+        Initialize-ShortcutRegistry
+    }
+    $modifierNames = Get-ShortcutModifierNamesFromConsoleModifiers -Modifiers $Modifiers
+    foreach ($entry in $script:ShortcutRegistry) {
+        if ($entry.Context -ne $Context) { continue }
+        if ($entry.Action -eq 'Noop') { continue }
+        if ([System.ConsoleKey]$entry.Key -ne $Key) { continue }
+        if (Test-ShortcutModifiersEqual -Left ([string[]]$entry.Modifiers) -Right ([string[]]$modifierNames)) {
+            return $entry
+        }
+    }
+    return $null
+}
+
+function Invoke-ShortcutAction {
+    param(
+        [string]$Action
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Action) -or $Action -eq 'Noop') {
+        return
+    }
+
+    $panel = Get-ActivePanel
+    switch ($Action) {
+        'Help' { Show-HelpViewer }
+        'UserMenu' { Show-UserMenu }
+        'View' { Invoke-View }
+        'Edit' { Invoke-Edit }
+        'Copy' { Invoke-Copy }
+        'Move' { Invoke-Move }
+        'Mkdir' { Invoke-Mkdir }
+        'Delete' { Invoke-Delete }
+        'MainMenu' { Show-MainMenu }
+        'Quit' {
+            if (Confirm-Dialog -Message 'Quit console_commander?' -DefaultYes $true) {
+                $script:State.ExitRequested = $true
+            }
+        }
+        'RefreshPanel' { Refresh-Panel -Panel $panel }
+        'FullRepaint' { Request-FullRedraw; Render-App }
+        'ToggleShellView' { if ([bool]$script:State.ShellViewVisible) { Exit-ShellView } else { Enter-ShellView } }
+        'QuickSearch' { Invoke-QuickSearch }
+        'MoveUp' { Move-Selection -Panel $panel -Delta -1 -VisibleRows $script:State.VisibleRows }
+        'MoveDown' { Move-Selection -Panel $panel -Delta 1 -VisibleRows $script:State.VisibleRows }
+        'CommandHome' { Move-CommandCursorHome }
+        'PasteCommand' { Paste-CommandLineText }
+        'LeftDriveChooser' { $script:State.ActivePanel = 'Left'; [void](Select-DriveForPanel -Panel $script:State.LeftPanel) }
+        'RightDriveChooser' { $script:State.ActivePanel = 'Right'; [void](Select-DriveForPanel -Panel $script:State.RightPanel) }
+        'PanelHistoryBack' { [void](Move-PanelHistory -Panel $panel -Delta -1) }
+        'PanelHistoryForward' { [void](Move-PanelHistory -Panel $panel -Delta 1) }
+        'OpenLeftMenu' { Show-TopPullDownMenu -InitialIndex 0 }
+        'OpenFileMenu' { Show-TopPullDownMenu -InitialIndex 1 }
+        'OpenCommandMenu' { Show-TopPullDownMenu -InitialIndex 2 }
+        'OpenOptionsMenu' { Show-TopPullDownMenu -InitialIndex 3 }
+        'OpenRightMenu' { Show-TopPullDownMenu -InitialIndex 4 }
+        default { Show-Message -Message ('Shortcut action not implemented: {0}' -f $Action) }
+    }
+}
+
+function Test-ShortcutRegistry {
+    if ($null -eq $script:ShortcutRegistry -or @($script:ShortcutRegistry).Count -eq 0) {
+        Initialize-ShortcutRegistry
+    }
+
+    $seenSlots = @{}
+    foreach ($entry in $script:ShortcutRegistry) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.Context)) { return $false }
+        if ([string]::IsNullOrWhiteSpace([string]$entry.Layer)) { return $false }
+        if ([int]$entry.Slot -lt 1 -or [int]$entry.Slot -gt 10) { return $false }
+        if ([string]::IsNullOrWhiteSpace([string]$entry.KeyText)) { return $false }
+        if (-not ($script:ShortcutActionSet -contains [string]$entry.Action)) { return $false }
+        if ([string]$entry.KeyText -match '[^\x20-\x7E]') { return $false }
+        if ([string]$entry.ShortLabel -match '[^\x20-\x7E]') { return $false }
+        if (([string]$entry.KeyText).Length -gt 8) { return $false }
+        if ([bool]$entry.ShowInBar -and [string]::IsNullOrWhiteSpace([string]$entry.ShortLabel)) { return $false }
+        if (([string]$entry.ShortLabel).Length -gt 8) { return $false }
+        $slotKey = '{0}|{1}|{2}' -f $entry.Context, $entry.Layer, $entry.Slot
+        if ($seenSlots.ContainsKey($slotKey)) { return $false }
+        $seenSlots[$slotKey] = $true
+    }
+    foreach ($layer in @('Normal', 'Ctrl', 'Alt')) {
+        if (@(Get-ShortcutBarItems -Context 'Main' -Layer $layer).Count -ne 10) { return $false }
+    }
+    return $true
+}
+
+function Get-ActiveShortcutLayer {
+    if ($null -eq $script:InputModifierState) {
+        return 'Normal'
+    }
+    if ([bool]$script:InputModifierState.AltDown) {
+        return 'Alt'
+    }
+    if ([bool]$script:InputModifierState.CtrlDown) {
+        return 'Ctrl'
+    }
+    return 'Normal'
+}
+
+function Set-ModifierStateValues {
+    param(
+        [bool]$CtrlDown,
+        [bool]$AltDown,
+        [bool]$ShiftDown,
+        [string]$Source
+    )
+
+    if ($null -eq $script:InputModifierState) {
+        return
+    }
+
+    $oldLayer = [string]$script:InputModifierState.ActiveShortcutLayer
+    $oldCtrl = [bool]$script:InputModifierState.CtrlDown
+    $oldAlt = [bool]$script:InputModifierState.AltDown
+    $oldShift = [bool]$script:InputModifierState.ShiftDown
+    $script:InputModifierState.CtrlDown = $CtrlDown
+    $script:InputModifierState.AltDown = $AltDown
+    $script:InputModifierState.ShiftDown = $ShiftDown
+    $script:InputModifierState.Source = $Source
+    $newLayer = Get-ActiveShortcutLayer
+    $script:InputModifierState.ActiveShortcutLayer = $newLayer
+    if ($oldCtrl -ne $CtrlDown -or $oldAlt -ne $AltDown -or $oldShift -ne $ShiftDown -or $oldLayer -ne $newLayer) {
+        $script:InputModifierState.LastLayer = $oldLayer
+        $script:InputModifierState.LastChangeUtc = [DateTime]::UtcNow
+        Request-ShortcutBarRedraw
+        if ($oldLayer -ne $newLayer -and [bool]$script:MouseEventMonitorEnabled) {
+            Write-AppLog -Level 'INFO' -Message ('ShortcutLayer: {0} -> {1} Source={2}' -f $oldLayer, $newLayer, $Source)
+        }
+    }
+}
+
+function Initialize-ModifierStateSupport {
+    if ($null -eq $script:InputModifierState) {
+        return
+    }
+    if ([bool]$script:InputModifierState.AsyncKeyStateChecked) {
+        return
+    }
+    $script:InputModifierState.AsyncKeyStateChecked = $true
+    $script:InputModifierState.AsyncKeyStateAvailable = $false
+    try {
+        Ensure-NativeInputTypeLoaded
+        [void][ConsoleCommanderNativeInput]::GetAsyncKeyState(0x11)
+        $script:InputModifierState.AsyncKeyStateAvailable = $true
+        Write-AppLog -Level 'INFO' -Message 'GetAsyncKeyState available for shortcut modifier polling.'
+    }
+    catch {
+        $script:InputModifierState.AsyncKeyStateAvailable = $false
+        Write-AppLog -Level 'WARN' -Message ('GetAsyncKeyState unavailable; modifier-only shortcut bar switching may be unavailable: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Update-ModifierStateFromKeyInfo {
+    param(
+        [ConsoleKeyInfo]$KeyInfo
+    )
+
+    if ($null -eq $KeyInfo) {
+        return
+    }
+    $ctrl = (($KeyInfo.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+    $alt = (($KeyInfo.Modifiers -band [ConsoleModifiers]::Alt) -ne 0)
+    $shift = (($KeyInfo.Modifiers -band [ConsoleModifiers]::Shift) -ne 0)
+    Set-ModifierStateValues -CtrlDown $ctrl -AltDown $alt -ShiftDown $shift -Source 'KeyInfo'
+}
+
+function Update-ModifierStateFromNativeInputRecord {
+    param(
+        [object]$NativeEvent
+    )
+
+    if ($null -eq $NativeEvent) {
+        return
+    }
+    $shift = (([uint32]$NativeEvent.ControlKeyState -band 0x0010) -ne 0)
+    $alt = ((([uint32]$NativeEvent.ControlKeyState -band 0x0001) -ne 0) -or (([uint32]$NativeEvent.ControlKeyState -band 0x0002) -ne 0))
+    $control = ((([uint32]$NativeEvent.ControlKeyState -band 0x0004) -ne 0) -or (([uint32]$NativeEvent.ControlKeyState -band 0x0008) -ne 0))
+    Set-ModifierStateValues -CtrlDown $control -AltDown $alt -ShiftDown $shift -Source 'Win32'
+}
+
+function Update-ModifierStateFromAsyncKeyState {
+    Initialize-ModifierStateSupport
+    if (-not [bool]$script:InputModifierState.AsyncKeyStateAvailable) {
+        return
+    }
+
+    try {
+        $ctrlValue = [ConsoleCommanderNativeInput]::GetAsyncKeyState(0x11)
+        $altValue = [ConsoleCommanderNativeInput]::GetAsyncKeyState(0x12)
+        $shiftValue = [ConsoleCommanderNativeInput]::GetAsyncKeyState(0x10)
+        $ctrl = ((([int]$ctrlValue) -band 0x8000) -ne 0)
+        $alt = ((([int]$altValue) -band 0x8000) -ne 0)
+        $shift = ((([int]$shiftValue) -band 0x8000) -ne 0)
+        $script:InputModifierState.LastPollUtc = [DateTime]::UtcNow
+        Set-ModifierStateValues -CtrlDown $ctrl -AltDown $alt -ShiftDown $shift -Source 'Async'
+    }
+    catch {
+        $script:InputModifierState.AsyncKeyStateAvailable = $false
+    }
 }
 
 function New-RenderLine {
@@ -2567,23 +2938,27 @@ function Add-FunctionKeyBarToLines {
 
     $colors = Get-ThemeColors
     $line = $Lines[$Layout.FunctionKeyRow]
-    $items = @(
-        @('F1', 'Help', [System.ConsoleKey]::F1), @('F2', 'User', [System.ConsoleKey]::F2), @('F3', 'View', [System.ConsoleKey]::F3), @('F4', 'Edit', [System.ConsoleKey]::F4), @('F5', 'Copy', [System.ConsoleKey]::F5),
-        @('F6', 'Move', [System.ConsoleKey]::F6), @('F7', 'Mkdir', [System.ConsoleKey]::F7), @('F8', 'Delete', [System.ConsoleKey]::F8), @('F9', 'Menu', [System.ConsoleKey]::F9), @('F10', 'Quit', [System.ConsoleKey]::F10)
-    )
+    $layer = Get-ShortcutBarLayer
+    $items = Get-ShortcutBarItems -Context 'Main' -Layer $layer
+    $script:RenderState.ShortcutBarLayer = $layer
     $script:RenderState.FunctionKeyZones = @()
     if (-not [bool]$script:Config.UseColor) {
         $parts = @()
         $x = 0
         foreach ($item in $items) {
-            $key = [string]$item[0]
-            $label = [string]$item[1]
-            $part = ('{0}:{1}' -f $key, $label)
+            $key = [string]$item.KeyText
+            $label = [string]$item.ShortLabel
+            $part = Format-ShortcutBarSegment -Item $item
             if (($x + $part.Length) -le $Layout.Width) {
                 $script:RenderState.FunctionKeyZones += [pscustomobject]@{
                     Key = $key
                     Label = $label
-                    ConsoleKey = $item[2]
+                    ConsoleKey = $item.Key
+                    Modifiers = @($item.Modifiers)
+                    Action = [string]$item.Action
+                    Layer = $layer
+                    Slot = [int]$item.Slot
+                    ShowInBar = [bool]$item.ShowInBar
                     Left = $x
                     Right = $x + $part.Length - 1
                     Top = $Layout.FunctionKeyRow
@@ -2600,11 +2975,16 @@ function Add-FunctionKeyBarToLines {
     Add-RenderSegment -Line $line -Left 0 -Text '' -Width $Layout.Width -Foreground $colors.KeyForeground -Background $colors.KeyBackground
     $x = 0
     foreach ($item in $items) {
-        $key = [string]$item[0]
-        $label = [string]$item[1]
-        $consoleKey = $item[2]
+        $key = [string]$item.KeyText
+        $label = [string]$item.ShortLabel
+        $consoleKey = $item.Key
         $tokenText = (' {0} ' -f $key)
-        $labelText = (' {0} ' -f $label)
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $labelText = ' '
+        }
+        else {
+            $labelText = (' {0} ' -f $label)
+        }
         $segmentWidth = $tokenText.Length + $labelText.Length + 1
         if (($x + $segmentWidth) -gt $Layout.Width) {
             break
@@ -2615,6 +2995,11 @@ function Add-FunctionKeyBarToLines {
             Key = $key
             Label = $label
             ConsoleKey = $consoleKey
+            Modifiers = @($item.Modifiers)
+            Action = [string]$item.Action
+            Layer = $layer
+            Slot = [int]$item.Slot
+            ShowInBar = [bool]$item.ShowInBar
             Left = $segmentLeft
             Right = $segmentRight
             Top = $Layout.FunctionKeyRow
@@ -2681,6 +3066,50 @@ function Render-App {
     }
     catch {
     }
+}
+
+function Redraw-ShortcutBarOnly {
+    if ([bool]$script:State.ShellViewVisible) {
+        return
+    }
+
+    $layout = $script:RenderState.LastLayout
+    if ($null -eq $layout -or $layout.TooSmall) {
+        Request-FullRedraw
+        return
+    }
+
+    $size = Get-ConsoleSizeSafe
+    if ($size.Width -ne [int]$layout.Width -or $size.Height -le [int]$layout.FunctionKeyRow) {
+        Request-FullRedraw
+        return
+    }
+
+    $lines = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $size.Height; $i++) {
+        [void]$lines.Add((New-RenderLine -Width $size.Width))
+    }
+    Add-FunctionKeyBarToLines -Lines $lines -Layout $layout
+    $row = [int]$layout.FunctionKeyRow
+    $key = Get-RenderLineKey -Line $lines[$row]
+    try { [Console]::CursorVisible = $false } catch {}
+    try {
+        Write-RenderLine -Top $row -Line $lines[$row]
+        $script:RenderState.LineCache[$row] = $key
+    }
+    catch {
+        Request-FullRedraw
+        return
+    }
+    try {
+        if ($null -ne $script:RenderState.CommandCursorTop) {
+            [Console]::SetCursorPosition([int]$script:RenderState.CommandCursorLeft, [int]$script:RenderState.CommandCursorTop)
+            [Console]::CursorVisible = $true
+        }
+    }
+    catch {
+    }
+    $script:RenderState.ShortcutBarRedrawRequired = $false
 }
 
 function Restore-ScreenRows {
@@ -2851,7 +3280,17 @@ function Get-MouseDiagnosticsLines {
         ('VT mouse backend available: {0}' -f $script:MouseDiagnosticsState.VtMouseBackendAvailable),
         ('Selected backend: {0}' -f $script:MouseDiagnosticsState.SelectedBackend),
         ('Failure reason: {0}' -f $script:MouseDiagnosticsState.FailureReason),
-        ('Last Win32 error: {0}' -f $script:MouseDiagnosticsState.LastWin32Error)
+        ('Last Win32 error: {0}' -f $script:MouseDiagnosticsState.LastWin32Error),
+        '',
+        ('AsyncKeyState available: {0}' -f [bool]$script:InputModifierState.AsyncKeyStateAvailable),
+        ('Ctrl down: {0}' -f [bool]$script:InputModifierState.CtrlDown),
+        ('Alt down: {0}' -f [bool]$script:InputModifierState.AltDown),
+        ('Shift down: {0}' -f [bool]$script:InputModifierState.ShiftDown),
+        ('Active shortcut layer: {0}' -f [string]$script:InputModifierState.ActiveShortcutLayer),
+        ('Last shortcut layer: {0}' -f [string]$script:InputModifierState.LastLayer),
+        ('Modifier source: {0}' -f [string]$script:InputModifierState.Source),
+        ('Modifier changed UTC: {0}' -f [string]$script:InputModifierState.LastChangeUtc),
+        ('Shortcut bar redraw required: {0}' -f [bool]$script:RenderState.ShortcutBarRedrawRequired)
     )
     return $lines
 }
@@ -2880,6 +3319,8 @@ public class ConsoleCommanderNativeInput
     public const uint ENABLE_EXTENDED_FLAGS = 0x0080;
     public const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
     public const uint ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
+    public const uint WAIT_OBJECT_0 = 0x00000000;
+    public const uint WAIT_TIMEOUT = 0x00000102;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct COORD
@@ -2953,6 +3394,12 @@ public class ConsoleCommanderNativeInput
     [DllImport("kernel32.dll", EntryPoint="ReadConsoleInputW", SetLastError = true)]
     public static extern bool ReadConsoleInputW(IntPtr hConsoleInput, [Out] INPUT_RECORD[] lpBuffer, uint nLength, out uint lpNumberOfEventsRead);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern short GetAsyncKeyState(int vKey);
+
     public static InputEvent ReadInputEvent(IntPtr handle)
     {
         INPUT_RECORD[] records = new INPUT_RECORD[1];
@@ -2968,10 +3415,6 @@ public class ConsoleCommanderNativeInput
             INPUT_RECORD record = records[0];
             if (record.EventType == KEY_EVENT)
             {
-                if (!record.KeyEvent.bKeyDown)
-                {
-                    continue;
-                }
                 InputEvent e = new InputEvent();
                 e.Type = "Key";
                 e.KeyDown = record.KeyEvent.bKeyDown;
@@ -2998,6 +3441,24 @@ public class ConsoleCommanderNativeInput
                 return e;
             }
         }
+    }
+
+    public static InputEvent ReadInputEventWithTimeout(IntPtr handle, uint timeoutMs)
+    {
+        uint wait = WaitForSingleObject(handle, timeoutMs);
+        if (wait == WAIT_TIMEOUT)
+        {
+            InputEvent tick = new InputEvent();
+            tick.Type = "None";
+            return tick;
+        }
+        if (wait != WAIT_OBJECT_0)
+        {
+            InputEvent failed = new InputEvent();
+            failed.Type = "None";
+            return failed;
+        }
+        return ReadInputEvent(handle);
     }
 }
 "@
@@ -3288,6 +3749,58 @@ function New-InputKeyEvent {
         SuppressedDuplicateClick = $false
         ClickElapsedMs = -1
         ActionTaken = 'Ignored'
+    }
+}
+
+function New-InputModifierEvent {
+    return [pscustomobject]@{
+        Type = 'Modifier'
+        KeyInfo = $null
+        X = 0
+        Y = 0
+        ButtonState = 0
+        ButtonDown = $false
+        ButtonUp = $false
+        Click = $false
+        DoubleClick = $false
+        NativeDoubleClick = $false
+        SyntheticDoubleClick = $false
+        WheelDelta = 0
+        EventFlags = 0
+        Backend = $script:MouseBackend
+        ClickSequence = 0
+        ZoneKind = $null
+        PanelName = $null
+        RowIndex = $null
+        SuppressedDuplicateClick = $false
+        ClickElapsedMs = -1
+        ActionTaken = 'Modifier'
+    }
+}
+
+function New-InputTickEvent {
+    return [pscustomobject]@{
+        Type = 'Tick'
+        KeyInfo = $null
+        X = 0
+        Y = 0
+        ButtonState = 0
+        ButtonDown = $false
+        ButtonUp = $false
+        Click = $false
+        DoubleClick = $false
+        NativeDoubleClick = $false
+        SyntheticDoubleClick = $false
+        WheelDelta = 0
+        EventFlags = 0
+        Backend = $script:MouseBackend
+        ClickSequence = 0
+        ZoneKind = $null
+        PanelName = $null
+        RowIndex = $null
+        SuppressedDuplicateClick = $false
+        ClickElapsedMs = -1
+        ActionTaken = 'Tick'
     }
 }
 
@@ -3740,13 +4253,29 @@ function Disable-VtInputAfterParserFailure {
 }
 
 function Read-VtInputEvent {
+    return (Read-VtInputEventWithTimeout -TimeoutMs 0)
+}
+
+function Read-VtInputEventWithTimeout {
+    param(
+        [int]$TimeoutMs = 50
+    )
+
     try {
         $queued = Pop-PendingInputEvent
         if ($null -ne $queued) {
             return $queued
         }
 
-        $key = Read-KeySafe
+        if ($TimeoutMs -le 0) {
+            $key = Read-KeySafe
+        }
+        else {
+            $key = Read-KeyWithTimeout -TimeoutMs $TimeoutMs
+            if ($null -eq $key) {
+                return (New-InputTickEvent)
+            }
+        }
         $isEscape = ($key.Key -eq [ConsoleKey]::Escape -or [int][char]$key.KeyChar -eq 27)
         if ($isEscape) {
             $sequenceEvent = Try-ReadVtSequenceEvent
@@ -3780,9 +4309,16 @@ function Read-InputEvent {
                     return [pscustomobject]@{ Type = 'Resize'; KeyInfo = $null; X = 0; Y = 0; ButtonState = 0; ButtonDown = $false; ButtonUp = $false; Click = $false; DoubleClick = $false; NativeDoubleClick = $false; SyntheticDoubleClick = $false; WheelDelta = 0; EventFlags = 0; Backend = 'Win32'; ClickSequence = 0; ZoneKind = $null; PanelName = $null; RowIndex = $null; SuppressedDuplicateClick = $false; ClickElapsedMs = -1; ActionTaken = 'Ignored' }
                 }
                 if ($nativeEvent.Type -eq 'Key') {
+                    Update-ModifierStateFromNativeInputRecord -NativeEvent $nativeEvent
+                    $virtualKey = [int]$nativeEvent.VirtualKeyCode
+                    $isModifierOnly = (($virtualKey -eq 16 -or $virtualKey -eq 17 -or $virtualKey -eq 18) -and [int][char]$nativeEvent.KeyChar -eq 0)
+                    if (-not [bool]$nativeEvent.KeyDown -or $isModifierOnly) {
+                        return (New-InputModifierEvent)
+                    }
                     return (New-InputKeyEvent -KeyInfo (Convert-NativeKeyEvent -NativeEvent $nativeEvent))
                 }
                 if ($nativeEvent.Type -eq 'Mouse') {
+                    Update-ModifierStateFromNativeInputRecord -NativeEvent $nativeEvent
                     $nativeDoubleClick = ($nativeEvent.EventFlags -eq 0x0002)
                     $wheelDelta = 0
                     if ($nativeEvent.EventFlags -eq 0x0004 -or $nativeEvent.EventFlags -eq 0x0008) {
@@ -3819,6 +4355,92 @@ function Read-InputEvent {
     }
 
     return (New-InputKeyEvent -KeyInfo (Read-KeySafe))
+}
+
+function Read-InputEventWithTimeout {
+    param(
+        [int]$TimeoutMs = 50
+    )
+
+    $queued = Pop-PendingInputEvent
+    if ($null -ne $queued) {
+        return $queued
+    }
+
+    if ($script:MouseInputAvailable -and $script:MouseBackend -eq 'Win32') {
+        while ($true) {
+            try {
+                if ($TimeoutMs -le 0) {
+                    $nativeEvent = [ConsoleCommanderNativeInput]::ReadInputEvent($script:ConsoleInputHandle)
+                }
+                else {
+                    $nativeEvent = [ConsoleCommanderNativeInput]::ReadInputEventWithTimeout($script:ConsoleInputHandle, [uint32]$TimeoutMs)
+                }
+                if ($null -eq $nativeEvent -or $nativeEvent.Type -eq 'None') {
+                    if ($TimeoutMs -gt 0) {
+                        return (New-InputTickEvent)
+                    }
+                    continue
+                }
+                if ($nativeEvent.Type -eq 'Resize') {
+                    Request-FullRedraw
+                    return [pscustomobject]@{ Type = 'Resize'; KeyInfo = $null; X = 0; Y = 0; ButtonState = 0; ButtonDown = $false; ButtonUp = $false; Click = $false; DoubleClick = $false; NativeDoubleClick = $false; SyntheticDoubleClick = $false; WheelDelta = 0; EventFlags = 0; Backend = 'Win32'; ClickSequence = 0; ZoneKind = $null; PanelName = $null; RowIndex = $null; SuppressedDuplicateClick = $false; ClickElapsedMs = -1; ActionTaken = 'Ignored' }
+                }
+                if ($nativeEvent.Type -eq 'Key') {
+                    Update-ModifierStateFromNativeInputRecord -NativeEvent $nativeEvent
+                    $virtualKey = [int]$nativeEvent.VirtualKeyCode
+                    $isModifierOnly = (($virtualKey -eq 16 -or $virtualKey -eq 17 -or $virtualKey -eq 18) -and [int][char]$nativeEvent.KeyChar -eq 0)
+                    if (-not [bool]$nativeEvent.KeyDown -or $isModifierOnly) {
+                        return (New-InputModifierEvent)
+                    }
+                    return (New-InputKeyEvent -KeyInfo (Convert-NativeKeyEvent -NativeEvent $nativeEvent))
+                }
+                if ($nativeEvent.Type -eq 'Mouse') {
+                    Update-ModifierStateFromNativeInputRecord -NativeEvent $nativeEvent
+                    $nativeDoubleClick = ($nativeEvent.EventFlags -eq 0x0002)
+                    $wheelDelta = 0
+                    if ($nativeEvent.EventFlags -eq 0x0004 -or $nativeEvent.EventFlags -eq 0x0008) {
+                        $wheelWord = [int](($nativeEvent.ButtonState -shr 16) -band 0xffff)
+                        if ($wheelWord -gt 32767) {
+                            $wheelDelta = $wheelWord - 65536
+                        }
+                        else {
+                            $wheelDelta = $wheelWord
+                        }
+                    }
+                    $lowButtons = ([uint32]$nativeEvent.ButtonState -band 0x0000001F)
+                    $isMove = ($nativeEvent.EventFlags -eq 0x0001)
+                    $isWheel = ($nativeEvent.EventFlags -eq 0x0004 -or $nativeEvent.EventFlags -eq 0x0008)
+                    $buttonDown = (($nativeEvent.EventFlags -eq 0 -and $lowButtons -ne 0) -or $nativeDoubleClick)
+                    $buttonUp = ($nativeEvent.EventFlags -eq 0 -and $lowButtons -eq 0)
+                    $click = (($buttonDown -and -not $isMove -and -not $isWheel) -or $nativeDoubleClick)
+                    return (New-InputMouseEvent -X ([int]$nativeEvent.X) -Y ([int]$nativeEvent.Y) -ButtonState ([uint32]$nativeEvent.ButtonState) -ButtonDown $buttonDown -ButtonUp $buttonUp -Click $click -DoubleClick $nativeDoubleClick -WheelDelta $wheelDelta -EventFlags ([uint32]$nativeEvent.EventFlags) -Backend 'Win32' -NativeDoubleClick $nativeDoubleClick)
+                }
+            }
+            catch {
+                $script:MouseInputAvailable = $false
+                $script:MouseBackend = 'KeyboardOnly'
+                Set-MouseFailureReason -Reason ('ReadConsoleInput timeout path failed while running: {0}' -f $_.Exception.Message)
+                Write-AppLog -Level 'WARN' -Message ('Mouse input timeout read failed; keyboard-only mode active: {0}' -f $script:MouseUnavailableReason)
+                Request-FullRedraw
+                break
+            }
+        }
+    }
+
+    if ($script:MouseInputAvailable -and $script:MouseBackend -eq 'VT') {
+        return (Read-VtInputEventWithTimeout -TimeoutMs $TimeoutMs)
+    }
+
+    if ($TimeoutMs -le 0) {
+        return (New-InputKeyEvent -KeyInfo (Read-KeySafe))
+    }
+
+    $key = Read-KeyWithTimeout -TimeoutMs $TimeoutMs
+    if ($null -eq $key) {
+        return (New-InputTickEvent)
+    }
+    return (New-InputKeyEvent -KeyInfo $key)
 }
 
 function Read-KeyEventOnly {
@@ -8778,11 +9400,10 @@ function Handle-MouseEvent {
         Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'FunctionKey' -Value ([string]$functionZone.Key)
         $script:LastMouseClick = $null
         if ([bool]$MouseEvent.Click -and -not [bool]$MouseEvent.ButtonUp) {
-            $action = ('FunctionKey:{0}' -f $functionZone.Key)
+            $action = ('Shortcut:{0}' -f [string]$functionZone.Action)
             Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ActionTaken' -Value $action
             Write-MouseEventDebugLog -MouseEvent $MouseEvent -Action $action
-            $keyInfo = New-SafeConsoleKeyInfo -KeyChar ([char]0) -Key ([System.ConsoleKey]$functionZone.ConsoleKey)
-            Handle-Key -KeyInfo $keyInfo
+            Invoke-ShortcutAction -Action ([string]$functionZone.Action)
         }
         else {
             Set-ObjectNoteProperty -InputObject $MouseEvent -Name 'ActionTaken' -Value 'Ignored'
@@ -8997,41 +9618,87 @@ function Start-InteractiveApp {
     }
 
     Initialize-ConsoleInputMode
+    Initialize-ShortcutRegistry
+    Initialize-ModifierStateSupport
     Clear-ScreenSafe
     Request-FullRedraw
 
     try {
+        $renderOnNextLoop = $true
         while (-not $script:State.ExitRequested) {
             $size = Get-ConsoleSizeSafe
             $script:State.VisibleRows = [Math]::Max(1, $size.Height - 8)
             if ([bool]$script:State.ShellViewVisible) {
-                Render-ShellView
+                if ($renderOnNextLoop -or [bool]$script:RenderState.FullRedrawRequired) {
+                    Render-ShellView
+                    $renderOnNextLoop = $false
+                }
             }
             else {
-                Render-App
+                Update-ModifierStateFromAsyncKeyState
+                $layoutMissing = ($null -eq $script:RenderState.LastLayout)
+                $sizeChanged = ($script:RenderState.LastWidth -ne $size.Width -or $script:RenderState.LastHeight -ne $size.Height)
+                if ($renderOnNextLoop -or [bool]$script:RenderState.FullRedrawRequired -or $layoutMissing -or $sizeChanged) {
+                    Render-App
+                    $renderOnNextLoop = $false
+                }
+                elseif ([bool]$script:RenderState.ShortcutBarRedrawRequired) {
+                    Redraw-ShortcutBarOnly
+                }
             }
             try {
-                $inputEvent = Read-InputEvent
+                $inputEvent = Read-InputEventWithTimeout -TimeoutMs 50
                 if ([bool]$script:State.ShellViewVisible) {
-                    if ($inputEvent.Type -eq 'Key') {
+                    if ($inputEvent.Type -eq 'Tick') {
+                        continue
+                    }
+                    elseif ($inputEvent.Type -eq 'Key') {
                         Handle-ShellViewKey -KeyInfo $inputEvent.KeyInfo
+                        $renderOnNextLoop = $true
                     }
                     elseif ($inputEvent.Type -eq 'Mouse') {
                         Handle-ShellViewMouseEvent -MouseEvent $inputEvent
+                        $renderOnNextLoop = $true
                     }
                     elseif ($inputEvent.Type -eq 'Resize') {
                         Request-FullRedraw
+                        $renderOnNextLoop = $true
                     }
                 }
                 else {
-                    if ($inputEvent.Type -eq 'Key') {
+                    if ($inputEvent.Type -eq 'Tick') {
+                        Update-ModifierStateFromAsyncKeyState
+                        if ([bool]$script:RenderState.ShortcutBarRedrawRequired) {
+                            Redraw-ShortcutBarOnly
+                        }
+                        continue
+                    }
+                    elseif ($inputEvent.Type -eq 'Modifier') {
+                        if ([bool]$script:RenderState.ShortcutBarRedrawRequired) {
+                            Redraw-ShortcutBarOnly
+                        }
+                    }
+                    elseif ($inputEvent.Type -eq 'Key') {
+                        Update-ModifierStateFromKeyInfo -KeyInfo $inputEvent.KeyInfo
+                        if ([bool]$script:RenderState.ShortcutBarRedrawRequired) {
+                            Redraw-ShortcutBarOnly
+                        }
                         Handle-Key -KeyInfo $inputEvent.KeyInfo
+                        $renderOnNextLoop = $true
+                        if ($script:MouseBackend -ne 'Win32' -and -not [bool]$script:InputModifierState.AsyncKeyStateAvailable) {
+                            Set-ModifierStateValues -CtrlDown $false -AltDown $false -ShiftDown $false -Source 'Transient'
+                            if ([bool]$script:RenderState.ShortcutBarRedrawRequired) {
+                                Redraw-ShortcutBarOnly
+                            }
+                        }
                     }
                     elseif ($inputEvent.Type -eq 'Mouse') {
                         Handle-MouseEvent -MouseEvent $inputEvent
+                        $renderOnNextLoop = $true
                     }
                     elseif ($inputEvent.Type -eq 'Resize') {
                         Request-FullRedraw
+                        $renderOnNextLoop = $true
                     }
                 }
             }
@@ -9095,15 +9762,32 @@ function Start-MouseDiagnosticsMode {
         Write-Output ('VT probe: available={0} backend={1} reason={2}' -f $vtProbe.Available, $vtProbe.Backend, $vtProbe.FailureReason)
         Write-Output ''
         Write-Output 'Mouse diagnostics event loop. Press Esc to exit.'
+        Initialize-ModifierStateSupport
+        $lastShortcutLayer = [string]$script:InputModifierState.ActiveShortcutLayer
         while ($true) {
             try {
-                $event = Read-InputEvent
+                $event = Read-InputEventWithTimeout -TimeoutMs 100
             }
             catch {
                 Write-Output ('Mouse diagnostics stopped: {0}' -f $_.Exception.Message)
                 break
             }
-            if ($event.Type -eq 'Key') {
+            if ($event.Type -eq 'Tick') {
+                Update-ModifierStateFromAsyncKeyState
+                $currentLayer = [string]$script:InputModifierState.ActiveShortcutLayer
+                if ($currentLayer -ne $lastShortcutLayer) {
+                    Write-Output ('ShortcutLayer: {0} -> {1} Source={2}' -f $lastShortcutLayer, $currentLayer, [string]$script:InputModifierState.Source)
+                    $lastShortcutLayer = $currentLayer
+                }
+            }
+            elseif ($event.Type -eq 'Modifier') {
+                $currentLayer = [string]$script:InputModifierState.ActiveShortcutLayer
+                if ($currentLayer -ne $lastShortcutLayer) {
+                    Write-Output ('ShortcutLayer: {0} -> {1} Source={2}' -f $lastShortcutLayer, $currentLayer, [string]$script:InputModifierState.Source)
+                    $lastShortcutLayer = $currentLayer
+                }
+            }
+            elseif ($event.Type -eq 'Key') {
                 $key = $event.KeyInfo
                 Write-Output ('KEY backend={0} key={1} char={2} modifiers={3}' -f $event.Backend, $key.Key, [int][char]$key.KeyChar, $key.Modifiers)
                 if ($key.Key -eq [ConsoleKey]::Escape) {
@@ -9605,6 +10289,112 @@ function Run-SelfTest {
         finally {
             $script:Config.UseColor = $oldUseColorForFunctionKeys
             $script:LastMouseClick = $oldLastMouseClickForFunctionKeys
+            [void](Build-AppScreenLines -Width 80 -Height 25)
+        }
+
+        $oldModifierState = $script:InputModifierState.Clone()
+        $oldUseColorForShortcutRegistry = $script:Config.UseColor
+        try {
+            Initialize-ShortcutRegistry
+            $registryOk = Test-ShortcutRegistry
+            $normalItems = @(Get-ShortcutBarItems -Context 'Main' -Layer 'Normal')
+            $ctrlItems = @(Get-ShortcutBarItems -Context 'Main' -Layer 'Ctrl')
+            $altItems = @(Get-ShortcutBarItems -Context 'Main' -Layer 'Alt')
+            $ctrlOEntry = Find-ShortcutActionByKey -Key ([ConsoleKey]::O) -Modifiers ([ConsoleModifiers]::Control)
+            $altF2Entry = Find-ShortcutActionByKey -Key ([ConsoleKey]::F2) -Modifiers ([ConsoleModifiers]::Alt)
+            $normalLayerOk = ($normalItems.Count -eq 10 -and [string]$normalItems[0].KeyText -eq 'F1' -and [string]$normalItems[8].ShortLabel -eq 'Menu')
+            $ctrlLayerOk = ($ctrlItems.Count -eq 10 -and [string]$ctrlItems[2].Action -eq 'ToggleShellView' -and [string]$ctrlItems[8].Action -eq 'Noop' -and [string]$ctrlItems[8].KeyText -eq '--')
+            $altLayerOk = ($altItems.Count -eq 10 -and [string]$altItems[0].Action -eq 'LeftDriveChooser' -and [string]$altItems[9].Action -eq 'OpenRightMenu')
+            $findShortcutOk = ($null -ne $ctrlOEntry -and [string]$ctrlOEntry.Action -eq 'ToggleShellView' -and $null -ne $altF2Entry -and [string]$altF2Entry.Action -eq 'RightDriveChooser')
+            if (-not (Test-SelfCondition -Name 'shortcut registry layers and lookup' -Condition ($registryOk -and $normalLayerOk -and $ctrlLayerOk -and $altLayerOk -and $findShortcutOk) -Results $results)) { $failed++ }
+
+            $script:RenderState.ShortcutBarRedrawRequired = $false
+            Set-ModifierStateValues -CtrlDown $true -AltDown $false -ShiftDown $false -Source 'SelfTest'
+            $ctrlStateOk = (Get-ActiveShortcutLayer) -eq 'Ctrl' -and [bool]$script:RenderState.ShortcutBarRedrawRequired
+            Set-ModifierStateValues -CtrlDown $false -AltDown $true -ShiftDown $false -Source 'SelfTest'
+            $altStateOk = ((Get-ActiveShortcutLayer) -eq 'Alt')
+            Set-ModifierStateValues -CtrlDown $true -AltDown $true -ShiftDown $false -Source 'SelfTest'
+            $altPriorityOk = ((Get-ActiveShortcutLayer) -eq 'Alt')
+            Set-ModifierStateValues -CtrlDown $false -AltDown $false -ShiftDown $false -Source 'SelfTest'
+            $normalStateOk = ((Get-ActiveShortcutLayer) -eq 'Normal' -and [string]$script:InputModifierState.ActiveShortcutLayer -eq 'Normal')
+            if (-not (Test-SelfCondition -Name 'shortcut modifier state transitions' -Condition ($ctrlStateOk -and $altStateOk -and $altPriorityOk -and $normalStateOk) -Results $results)) { $failed++ }
+
+            $tickEvent = New-InputTickEvent
+            $tickEventOk = ($tickEvent.Type -eq 'Tick' -and $tickEvent.ActionTaken -eq 'Tick' -and $null -eq $tickEvent.KeyInfo -and -not [bool]$tickEvent.Click)
+            if (-not (Test-SelfCondition -Name 'input tick event is inert' -Condition $tickEventOk -Results $results)) { $failed++ }
+
+            $oldMouseInputAvailableForTick = $script:MouseInputAvailable
+            $oldMouseBackendForTick = $script:MouseBackend
+            try {
+                $script:MouseInputAvailable = $false
+                $script:MouseBackend = 'KeyboardOnly'
+                $timeoutEvent = Read-InputEventWithTimeout -TimeoutMs 1
+                $timeoutTickOk = ($null -ne $timeoutEvent -and $timeoutEvent.Type -eq 'Tick')
+                if (-not (Test-SelfCondition -Name 'input timeout returns tick' -Condition $timeoutTickOk -Results $results)) { $failed++ }
+            }
+            finally {
+                $script:MouseInputAvailable = $oldMouseInputAvailableForTick
+                $script:MouseBackend = $oldMouseBackendForTick
+            }
+
+            $redrawOnlyOk = $false
+            try {
+                $script:Config.UseColor = $false
+                $redrawSize = Get-ConsoleSizeSafe
+                [void](Build-AppScreenLines -Width $redrawSize.Width -Height $redrawSize.Height)
+                $script:RenderState.FullRedrawRequired = $false
+                Set-ModifierStateValues -CtrlDown $true -AltDown $false -ShiftDown $false -Source 'SelfTest'
+                Redraw-ShortcutBarOnly
+                $redrawOnlyOk = ($script:RenderState.ShortcutBarLayer -eq 'Ctrl' -and -not [bool]$script:RenderState.FullRedrawRequired -and -not [bool]$script:RenderState.ShortcutBarRedrawRequired)
+            }
+            catch {
+                $redrawOnlyOk = $false
+            }
+            if (-not (Test-SelfCondition -Name 'shortcut bar redraw only row' -Condition $redrawOnlyOk -Results $results)) { $failed++ }
+
+            Set-ModifierStateValues -CtrlDown $true -AltDown $false -ShiftDown $false -Source 'SelfTest'
+            [void](Build-AppScreenLines -Width 120 -Height 30)
+            $ctrlBarText = Convert-RenderLineToPlainText -Line ([System.Collections.ArrayList](Build-AppScreenLines -Width 120 -Height 30))[29]
+            $ctrlBarOk = ($script:RenderState.ShortcutBarLayer -eq 'Ctrl' -and $ctrlBarText -like '*C-O*Shell*' -and $ctrlBarText -like '*C-V*Paste*')
+            Set-ModifierStateValues -CtrlDown $false -AltDown $true -ShiftDown $false -Source 'SelfTest'
+            $altLines = Build-AppScreenLines -Width 160 -Height 30
+            $altBarText = Convert-RenderLineToPlainText -Line $altLines[29]
+            $altBarOk = ($script:RenderState.ShortcutBarLayer -eq 'Alt' -and $altBarText -like '*A-F1*LDrive*' -and $altBarText -like '*A-R*Right*')
+            $altNarrowRenderOk = $false
+            try {
+                [void](Build-AppScreenLines -Width 80 -Height 25)
+                $altNarrowRenderOk = ($script:RenderState.ShortcutBarLayer -eq 'Alt')
+            }
+            catch {
+                $altNarrowRenderOk = $false
+            }
+            Set-ModifierStateValues -CtrlDown $false -AltDown $false -ShiftDown $false -Source 'SelfTest'
+            [void](Build-AppScreenLines -Width 120 -Height 30)
+            $normalBarOk = ($script:RenderState.ShortcutBarLayer -eq 'Normal' -and @($script:RenderState.FunctionKeyZones | Where-Object { $_.Action -eq 'MainMenu' }).Count -eq 1)
+            if (-not (Test-SelfCondition -Name 'shortcut bar modifier layers render' -Condition ($ctrlBarOk -and $altBarOk -and $altNarrowRenderOk -and $normalBarOk) -Results $results)) { $failed++ }
+
+            $script:State.VisibleRows = 10
+            $script:State.ActivePanel = 'Left'
+            Refresh-Panel -Panel $script:State.LeftPanel
+            $beforeIndex = [int]$script:State.LeftPanel.SelectedIndex
+            Set-ModifierStateValues -CtrlDown $true -AltDown $false -ShiftDown $false -Source 'SelfTest'
+            [void](Build-AppScreenLines -Width 120 -Height 30)
+            $ctrlDownZone = @($script:RenderState.FunctionKeyZones | Where-Object { $_.Action -eq 'MoveDown' } | Select-Object -First 1)
+            $shortcutClickOk = $false
+            if ($ctrlDownZone.Count -gt 0) {
+                $clickX = [int][Math]::Floor(([int]$ctrlDownZone[0].Left + [int]$ctrlDownZone[0].Right) / 2)
+                $shortcutClick = New-InputMouseEvent -X $clickX -Y ([int]$ctrlDownZone[0].Top) -ButtonState ([uint32]0) -ButtonDown $true -Click $true -Backend 'VT'
+                Handle-MouseEvent -MouseEvent $shortcutClick
+                $shortcutClickOk = ([int]$script:State.LeftPanel.SelectedIndex -eq ($beforeIndex + 1) -and [string]$shortcutClick.ActionTaken -eq 'Shortcut:MoveDown')
+            }
+            if (-not (Test-SelfCondition -Name 'shortcut bar mouse invokes visible layer action' -Condition $shortcutClickOk -Results $results)) { $failed++ }
+        }
+        finally {
+            foreach ($key in $oldModifierState.Keys) {
+                $script:InputModifierState[$key] = $oldModifierState[$key]
+            }
+            $script:Config.UseColor = $oldUseColorForShortcutRegistry
+            $script:RenderState.ShortcutBarRedrawRequired = $false
             [void](Build-AppScreenLines -Width 80 -Height 25)
         }
 
