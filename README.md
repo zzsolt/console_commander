@@ -4,6 +4,10 @@
 
 The project is delivered as a single `.ps1` script. It does not require a GUI framework, external PowerShell modules, or helper binaries.
 
+## Why this project matters
+
+`console_commander` targets Windows administration environments where a GUI file manager may be unavailable, impractical, or undesirable. It provides a dependency-free, keyboard-first, dual-pane file manager as a single Windows PowerShell 5.1 script, with a focus on Server Core-style console workflows.
+
 ## Highlights
 
 - Dual-pane commander-style console UI
